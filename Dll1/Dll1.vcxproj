@@ -160,7 +160,7 @@
     <ClInclude Include="ext\imgui\imstb_rectpack.h" />
     <ClInclude Include="ext\imgui\imstb_textedit.h" />
     <ClInclude Include="ext\imgui\imstb_truetype.h" />
-    <ClInclude Include="ext\imgui\imgui_impl_dx11.h" />
+    <ClInclude Include="ext\imgui\imgui_impl_dx9.h" />
     <ClInclude Include="ext\imgui\imgui_impl_win32.h" />
   </ItemGroup>
   <ItemGroup>
@@ -180,7 +180,7 @@
     <ClCompile Include="ext\imgui\imgui_demo.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="ext\imgui\imgui_impl_dx11.cpp">
+    <ClCompile Include="ext\imgui\imgui_impl_dx9.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="ext\imgui\imgui_impl_win32.cpp">
