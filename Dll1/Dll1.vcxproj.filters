@@ -13,6 +13,24 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="源文件\core">
+      <UniqueIdentifier>{A1B2C3D4-0001-0001-0001-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\core">
+      <UniqueIdentifier>{A1B2C3D4-0001-0001-0001-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\hooks">
+      <UniqueIdentifier>{A1B2C3D4-0002-0001-0001-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\hooks">
+      <UniqueIdentifier>{A1B2C3D4-0002-0001-0001-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\render">
+      <UniqueIdentifier>{A1B2C3D4-0003-0001-0001-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\render">
+      <UniqueIdentifier>{A1B2C3D4-0003-0001-0001-000000000002}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -21,6 +39,21 @@
     <ClInclude Include="pch.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="core\log.h">
+      <Filter>头文件\core</Filter>
+    </ClInclude>
+    <ClInclude Include="core\globals.h">
+      <Filter>头文件\core</Filter>
+    </ClInclude>
+    <ClInclude Include="hooks\d3d9_hook.h">
+      <Filter>头文件\hooks</Filter>
+    </ClInclude>
+    <ClInclude Include="render\overlay.h">
+      <Filter>头文件\render</Filter>
+    </ClInclude>
+    <ClInclude Include="render\menu.h">
+      <Filter>头文件\render</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -28,6 +61,18 @@
     </ClCompile>
     <ClCompile Include="pch.cpp">
       <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="core\globals.cpp">
+      <Filter>源文件\core</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\d3d9_hook.cpp">
+      <Filter>源文件\hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="render\overlay.cpp">
+      <Filter>源文件\render</Filter>
+    </ClCompile>
+    <ClCompile Include="render\menu.cpp">
+      <Filter>源文件\render</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
