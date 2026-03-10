@@ -4,4 +4,5 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="Dll1/Dll1.vcxproj" />
+  <Project Path="popUp/popUp.vcxproj" />
 </Solution>
