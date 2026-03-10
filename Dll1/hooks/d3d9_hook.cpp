@@ -10,7 +10,11 @@
 using SwapChainPresentFn = HRESULT(WINAPI*)(
     IDirect3DSwapChain9*, const RECT*, const RECT*, HWND, const RGNDATA*, DWORD);
 
+// IDirect3DDevice9::Reset signature (vtable[16])
+using DeviceResetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
+
 static SwapChainPresentFn g_origSwapChainPresent = nullptr;
+static DeviceResetFn      g_origDeviceReset = nullptr;
 
 // ─── Hooked SwapChain::Present ───
 
@@ -50,15 +54,41 @@ static HRESULT WINAPI HookedSwapChainPresent(
         pSwapChain, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
 }
 
+// ─── Hooked Device::Reset ───
+
+static HRESULT WINAPI HookedDeviceReset(
+    IDirect3DDevice9* pDevice,
+    D3DPRESENT_PARAMETERS* pPresentationParameters)
+{
+    Log("[*] Device::Reset called\n");
+
+    OnDeviceLost();
+
+    HRESULT hr = g_origDeviceReset(pDevice, pPresentationParameters);
+
+    if (SUCCEEDED(hr))
+        OnDeviceReset();
+    else
+        Log("[!] Device::Reset failed: 0x%08X\n", hr);
+
+    return hr;
+}
+
 // ─── vtable address resolution ───
 
-static uintptr_t GetSwapChainPresentAddress()
+struct HookAddresses
+{
+    uintptr_t swapChainPresent; // IDirect3DSwapChain9::Present  vtable[3]
+    uintptr_t deviceReset;      // IDirect3DDevice9::Reset       vtable[16]
+};
+
+static HookAddresses GetD3D9Addresses()
 {
     IDirect3D9* d3d9 = Direct3DCreate9(D3D_SDK_VERSION);
     if (!d3d9)
     {
         Log("[!] Direct3DCreate9 failed\n");
-        return 0;
+        return {};
     }
 
     const wchar_t* kClassName = L"SC2_DummyD3D9_Class";
@@ -78,7 +108,7 @@ static uintptr_t GetSwapChainPresentAddress()
         Log("[!] CreateWindowExW failed: %u\n", GetLastError());
         d3d9->Release();
         UnregisterClassW(kClassName, wc.hInstance);
-        return 0;
+        return {};
     }
 
     D3DPRESENT_PARAMETERS pp{};
@@ -98,7 +128,7 @@ static uintptr_t GetSwapChainPresentAddress()
         d3d9->Release();
         DestroyWindow(hwnd);
         UnregisterClassW(kClassName, wc.hInstance);
-        return 0;
+        return {};
     }
 
     IDirect3DSwapChain9* swapChain = nullptr;
@@ -110,14 +140,20 @@ static uintptr_t GetSwapChainPresentAddress()
         d3d9->Release();
         DestroyWindow(hwnd);
         UnregisterClassW(kClassName, wc.hInstance);
-        return 0;
+        return {};
     }
 
-    void** vtbl = *reinterpret_cast<void***>(swapChain);
-    uintptr_t presentAddr = reinterpret_cast<uintptr_t>(vtbl[3]);
+    void** scVtbl = *reinterpret_cast<void***>(swapChain);
+    void** devVtbl = *reinterpret_cast<void***>(device);
+
+    HookAddresses addrs{};
+    addrs.swapChainPresent = reinterpret_cast<uintptr_t>(scVtbl[3]);
+    addrs.deviceReset      = reinterpret_cast<uintptr_t>(devVtbl[16]);
 
     Log("[+] IDirect3DSwapChain9::Present = 0x%llX\n",
-        static_cast<unsigned long long>(presentAddr));
+        static_cast<unsigned long long>(addrs.swapChainPresent));
+    Log("[+] IDirect3DDevice9::Reset = 0x%llX\n",
+        static_cast<unsigned long long>(addrs.deviceReset));
 
     swapChain->Release();
     device->Release();
@@ -125,7 +161,7 @@ static uintptr_t GetSwapChainPresentAddress()
     DestroyWindow(hwnd);
     UnregisterClassW(kClassName, wc.hInstance);
 
-    return presentAddr;
+    return addrs;
 }
 
 // ─── Public API ───
@@ -143,36 +179,50 @@ bool SetupHooks()
         return false;
     }
 
-    uintptr_t presentAddr = GetSwapChainPresentAddress();
-    if (!presentAddr)
+    HookAddresses addrs = GetD3D9Addresses();
+    if (!addrs.swapChainPresent || !addrs.deviceReset)
     {
-        Log("[!] Failed to get SwapChain Present address\n");
+        Log("[!] Failed to get D3D9 vtable addresses\n");
         MH_Uninitialize();
         return false;
     }
 
+    // Hook SwapChain::Present
     MH_STATUS st = MH_CreateHook(
-        reinterpret_cast<LPVOID>(presentAddr),
+        reinterpret_cast<LPVOID>(addrs.swapChainPresent),
         &HookedSwapChainPresent,
         reinterpret_cast<LPVOID*>(&g_origSwapChainPresent));
     if (st != MH_OK)
     {
-        Log("[!] MH_CreateHook failed: %s\n", MH_StatusToString(st));
+        Log("[!] MH_CreateHook Present failed: %s\n", MH_StatusToString(st));
         MH_Uninitialize();
         return false;
     }
 
-    st = MH_EnableHook(reinterpret_cast<LPVOID>(presentAddr));
+    // Hook Device::Reset
+    st = MH_CreateHook(
+        reinterpret_cast<LPVOID>(addrs.deviceReset),
+        &HookedDeviceReset,
+        reinterpret_cast<LPVOID*>(&g_origDeviceReset));
+    if (st != MH_OK)
+    {
+        Log("[!] MH_CreateHook Reset failed: %s\n", MH_StatusToString(st));
+        MH_Uninitialize();
+        return false;
+    }
+
+    // Enable all hooks
+    st = MH_EnableHook(MH_ALL_HOOKS);
     if (st != MH_OK)
     {
         Log("[!] MH_EnableHook failed: %s\n", MH_StatusToString(st));
-        MH_RemoveHook(reinterpret_cast<LPVOID>(presentAddr));
         MH_Uninitialize();
         return false;
     }
 
-    Log("[+] D3D9 SwapChain::Present hooked @ 0x%llX\n",
-        static_cast<unsigned long long>(presentAddr));
+    Log("[+] D3D9 hooks installed: Present=0x%llX Reset=0x%llX\n",
+        static_cast<unsigned long long>(addrs.swapChainPresent),
+        static_cast<unsigned long long>(addrs.deviceReset));
     return true;
 }
 

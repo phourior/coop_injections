@@ -205,3 +205,15 @@ void RenderOverlayFrame()
         stateBlock->Release();
     }
 }
+
+void OnDeviceLost()
+{
+    if (g_imguiInitialized)
+        ImGui_ImplDX9_InvalidateDeviceObjects();
+}
+
+void OnDeviceReset()
+{
+    if (g_imguiInitialized)
+        ImGui_ImplDX9_CreateDeviceObjects();
+}
