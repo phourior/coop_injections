@@ -153,6 +153,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="framework.h" />
+    <ClInclude Include="hooks\game_hook.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="core\log.h" />
     <ClInclude Include="core\globals.h" />
@@ -175,6 +176,7 @@
     <ClCompile Include="core\globals.cpp" />
     <ClCompile Include="core\game_data.cpp" />
     <ClCompile Include="hooks\d3d9_hook.cpp" />
+    <ClCompile Include="hooks\game_hook.cpp" />
     <ClCompile Include="render\overlay.cpp" />
     <ClCompile Include="render\menu.cpp" />
     <ClCompile Include="ext\imgui\imgui.cpp">

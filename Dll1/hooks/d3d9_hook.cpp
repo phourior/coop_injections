@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "hooks/d3d9_hook.h"
+#include "hooks/game_hook.h"
 #include "render/overlay.h"
 #include "core/globals.h"
 #include "core/log.h"
@@ -210,6 +211,10 @@ bool SetupHooks()
         MH_Uninitialize();
         return false;
     }
+
+    // Hook game functions (OnGameLobbyUpdate etc.)
+    if (!SetupGameHooks())
+        Log("[!] SetupGameHooks failed (non-fatal, continuing)\n");
 
     // Enable all hooks
     st = MH_EnableHook(MH_ALL_HOOKS);
