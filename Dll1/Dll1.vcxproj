@@ -156,6 +156,8 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="core\log.h" />
     <ClInclude Include="core\globals.h" />
+    <ClInclude Include="core\memory.h" />
+    <ClInclude Include="core\game_data.h" />
     <ClInclude Include="hooks\d3d9_hook.h" />
     <ClInclude Include="render\overlay.h" />
     <ClInclude Include="render\menu.h" />
@@ -171,6 +173,7 @@
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="core\globals.cpp" />
+    <ClCompile Include="core\game_data.cpp" />
     <ClCompile Include="hooks\d3d9_hook.cpp" />
     <ClCompile Include="render\overlay.cpp" />
     <ClCompile Include="render\menu.cpp" />

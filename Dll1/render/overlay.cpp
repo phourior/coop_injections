@@ -186,6 +186,9 @@ void RenderOverlayFrame()
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
+    // 调试信息始终显示在左上角
+    DrawDebugOverlay();
+
     if (g_showMenu)
         DrawMenu();
 
