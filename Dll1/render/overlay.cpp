@@ -140,6 +140,33 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
+    // ─── 加载中文字体（微软雅黑） ───
+    {
+        ImFontConfig fontCfg;
+        fontCfg.OversampleH = 1;
+        fontCfg.OversampleV = 1;
+        fontCfg.PixelSnapH  = true;
+
+        // 包含完整中日韩统一表意文字 + 基本拉丁字符
+        static const ImWchar ranges[] = {
+            0x0020, 0x00FF, // Basic Latin + Latin Supplement
+            0x2000, 0x206F, // General Punctuation
+            0x3000, 0x30FF, // CJK Symbols, Hiragana, Katakana
+            0x31F0, 0x31FF, // Katakana Phonetic Extensions
+            0xFF00, 0xFFEF, // Halfwidth and Fullwidth Forms
+            0x4E00, 0x9FFF, // CJK Unified Ideographs
+            0, 
+        };
+
+        ImFont* font = io.Fonts->AddFontFromFileTTF(
+            "C:\\Windows\\Fonts\\msyh.ttc", 16.0f, &fontCfg, ranges);
+
+        if (font)
+            Log("[+] Chinese font loaded (msyh.ttc)\n");
+        else
+            Log("[!] Failed to load msyh.ttc, falling back to default\n");
+    }
+
     Log("[*] InitOverlay step 6: ImGui backend init\n");
 
     if (!ImGui_ImplWin32_Init(g_hWnd) || !ImGui_ImplDX9_Init(g_device))
