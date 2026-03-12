@@ -9,6 +9,8 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
+#include <string>
 
 // ─── 地图参数表 ───
 // keyword:  关键字匹配（子串）
@@ -54,6 +56,46 @@ static constexpr float kMiniMapBY_ref = 1065.0f; // 小地图左下角 Y
 // ─── 微调偏移（菜单中可调） ───
 static float s_adjustX = 29.0f;
 static float s_adjustY = 6.0f;
+static bool  s_configLoaded = false;
+
+// ─── JSON 配置文件路径 ───
+static std::string GetConfigPath()
+{
+    char path[MAX_PATH] = {};
+    GetModuleFileNameA(g_hModule, path, MAX_PATH);
+    // 将 DLL 文件名替换为配置文件名
+    char* lastSlash = strrchr(path, '\\');
+    if (lastSlash) *(lastSlash + 1) = '\0';
+    strcat_s(path, "sc2_offset_config.json");
+    return std::string(path);
+}
+
+static void SaveOffsetConfig()
+{
+    std::string path = GetConfigPath();
+    FILE* f = nullptr;
+    fopen_s(&f, path.c_str(), "w");
+    if (!f) return;
+    fprintf(f, "{\n  \"adjustX\": %.2f,\n  \"adjustY\": %.2f\n}\n", s_adjustX, s_adjustY);
+    fclose(f);
+}
+
+static void LoadOffsetConfig()
+{
+    std::string path = GetConfigPath();
+    FILE* f = nullptr;
+    fopen_s(&f, path.c_str(), "r");
+    if (!f) return;
+    char buf[256] = {};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    // 简单解析 "adjustX": value, "adjustY": value
+    const char* px = strstr(buf, "\"adjustX\"");
+    const char* py = strstr(buf, "\"adjustY\"");
+    if (px) { px = strchr(px, ':'); if (px) s_adjustX = (float)atof(px + 1); }
+    if (py) { py = strchr(py, ':'); if (py) s_adjustY = (float)atof(py + 1); }
+}
 
 // ─── 匹配当前地图 ───
 static const MapParams* FindMapByKeyword(const std::string& mapStr)
@@ -194,15 +236,26 @@ void DrawMenu()
     ImGui::Separator();
     ImGui::Text("\xe5\x88\x86\xe8\xbe\xa8\xe7\x8e\x87: %.0f x %.0f", g_screenWidth, g_screenHeight);
 
+    // 首次加载配置
+    if (!s_configLoaded)
+    {
+        LoadOffsetConfig();
+        s_configLoaded = true;
+    }
+
     ImGui::Separator();
     ImGui::Text("\xe5\xb0\x8f\xe5\x9c\xb0\xe5\x9b\xbe\xe6\xa0\xa1\xe5\x87\x86:");
-    ImGui::SliderFloat("X \xe5\x81\x8f\xe7\xa7\xbb", &s_adjustX, -50.0f, 50.0f, "%.0f px");
-    ImGui::SliderFloat("Y \xe5\x81\x8f\xe7\xa7\xbb", &s_adjustY, -50.0f, 50.0f, "%.0f px");
+    bool changed = false;
+    changed |= ImGui::SliderFloat("X \xe5\x81\x8f\xe7\xa7\xbb", &s_adjustX, -75.0f, 75.0f, "%.0f px");
+    changed |= ImGui::SliderFloat("Y \xe5\x81\x8f\xe7\xa7\xbb", &s_adjustY, -75.0f, 75.0f, "%.0f px");
     if (ImGui::Button("\xe9\x87\x8d\xe7\xbd\xae"))
     {
         s_adjustX = 29.0f;
         s_adjustY = 6.0f;
+        changed = true;
     }
+    if (changed)
+        SaveOffsetConfig();
 
     ImGui::End();
 }

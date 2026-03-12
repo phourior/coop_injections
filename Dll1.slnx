@@ -5,4 +5,7 @@
   </Configurations>
   <Project Path="Dll1/Dll1.vcxproj" Id="9627ebaa-d73b-4675-9839-00417de3ae4e" />
   <Project Path="popUp/popUp.vcxproj" Id="bd88f6b9-67f6-4189-b0b4-88301523583c" />
+  <Project Path="ZeratulRelicScanner/ZeratulRelicScanner.vcxproj" Id="8398dc83-dbd9-478e-a752-316b9d90036e">
+    <Platform Project="x64" />
+  </Project>
 </Solution>

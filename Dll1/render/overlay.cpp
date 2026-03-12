@@ -216,14 +216,15 @@ void RenderOverlayFrame()
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    // 调试信息始终显示在左上角
-    DrawDebugOverlay();
+    // 调试信息跟随菜单显示/隐藏
+    if (g_showMenu)
+    {
+        DrawDebugOverlay();
+        DrawMenu();
+    }
 
     // 小地图神器点始终渲染
     DrawMinimapOverlay();
-
-    if (g_showMenu)
-        DrawMenu();
 
     ImGui::EndFrame();
     ImGui::Render();
