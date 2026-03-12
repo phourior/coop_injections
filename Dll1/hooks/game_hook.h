@@ -33,7 +33,7 @@ struct LobbyData
 // 全局原始数据（hook 写，纯 C）
 extern RawLobbyData g_rawLobby;
 
-// 从 g_rawLobby 拷贝到 C++ 结构（UI 线程调用）
+// 从纯 C 结构拷贝到 C++ 结构（UI 线程调用）
 LobbyData SnapshotLobbyData();
 
 // Hook sub_1420BFBE0 = CBattleNet::OnGameLobbyUpdate

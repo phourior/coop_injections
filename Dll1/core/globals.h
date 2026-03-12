@@ -13,6 +13,10 @@ extern IDirect3DSwapChain9* g_swapChain;
 extern HWND     g_hWnd;
 extern WNDPROC  g_origWndProc;
 
+// Screen resolution (set during overlay init)
+extern float g_screenWidth;
+extern float g_screenHeight;
+
 // UI state
 extern volatile bool g_imguiInitialized;
 extern bool          g_showMenu;

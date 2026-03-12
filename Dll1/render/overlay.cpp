@@ -116,6 +116,9 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
 
     Log("[*] InitOverlay step 4: Subclass window hwnd=%p %ldx%ld\n", hwnd, w, h);
 
+    g_screenWidth  = static_cast<float>(w);
+    g_screenHeight = static_cast<float>(h);
+
     g_device = device;
     g_swapChain = pSwapChain;
     g_hWnd = hwnd;
@@ -159,7 +162,7 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
         };
 
         ImFont* font = io.Fonts->AddFontFromFileTTF(
-            "C:\\Windows\\Fonts\\msyh.ttc", 16.0f, &fontCfg, ranges);
+            "C:\\Windows\\Fonts\\msyh.ttc", 32.0f, &fontCfg, ranges);
 
         if (font)
             Log("[+] Chinese font loaded (msyh.ttc)\n");
@@ -215,6 +218,9 @@ void RenderOverlayFrame()
 
     // 调试信息始终显示在左上角
     DrawDebugOverlay();
+
+    // 小地图神器点始终渲染
+    DrawMinimapOverlay();
 
     if (g_showMenu)
         DrawMenu();

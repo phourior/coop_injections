@@ -5,3 +5,6 @@ void DrawMenu();
 
 // Draw debug overlay in top-left corner. Called every frame (always visible).
 void DrawDebugOverlay();
+
+// Draw artifact dot on minimap. Called every frame (always visible).
+void DrawMinimapOverlay();

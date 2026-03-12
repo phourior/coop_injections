@@ -3,6 +3,6 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="Dll1/Dll1.vcxproj" />
-  <Project Path="popUp/popUp.vcxproj" />
+  <Project Path="Dll1/Dll1.vcxproj" Id="9627ebaa-d73b-4675-9839-00417de3ae4e" />
+  <Project Path="popUp/popUp.vcxproj" Id="bd88f6b9-67f6-4189-b0b4-88301523583c" />
 </Solution>
