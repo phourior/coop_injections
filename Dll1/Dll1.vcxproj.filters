@@ -54,6 +54,42 @@
     <ClInclude Include="render\menu.h">
       <Filter>头文件\render</Filter>
     </ClInclude>
+    <ClInclude Include="hooks\game_hook.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="core\memory.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="core\game_data.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\imgui\imconfig.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\imgui\imgui.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\imgui\imgui_internal.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\imgui\imstb_rectpack.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\imgui\imstb_textedit.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\imgui\imstb_truetype.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\imgui\imgui_impl_dx9.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\imgui\imgui_impl_win32.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ext\stb_image.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -73,6 +109,36 @@
     </ClCompile>
     <ClCompile Include="render\menu.cpp">
       <Filter>源文件\render</Filter>
+    </ClCompile>
+    <ClCompile Include="core\game_data.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\game_hook.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ext\imgui\imgui.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ext\imgui\imgui_draw.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ext\imgui\imgui_tables.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ext\imgui\imgui_widgets.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ext\imgui\imgui_demo.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ext\imgui\imgui_impl_dx9.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ext\imgui\imgui_impl_win32.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ext\stb_image_impl.cpp">
+      <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

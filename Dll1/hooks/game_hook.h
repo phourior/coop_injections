@@ -38,3 +38,11 @@ LobbyData SnapshotLobbyData();
 
 // Hook sub_1420BFBE0 = CBattleNet::OnGameLobbyUpdate
 bool SetupGameHooks();
+
+// ─── 180 精通补丁（特征码定位，动态开关） ───
+// EnableMasteryMax: 扫描特征码并写入 shellcode，强制精通值 = 0x7FFF
+// DisableMasteryMax: 恢复原始字节
+// IsMasteryMaxEnabled: 查询当前状态
+bool EnableMasteryMax();
+void DisableMasteryMax();
+bool IsMasteryMaxEnabled();

@@ -178,42 +178,36 @@ void DrawDebugOverlay()
 
     ImGui::Separator();
 
-    // ─── 大厅信息（来自 hook） ───
-    LobbyData lobby = SnapshotLobbyData();
+    // ─── 大厅信息（直接读取 CBattleNet 链路） ───
+    LobbyInfo info = ReadLobbyInfo();
 
-    if (lobby.valid)
+    // 诊断：无论是否有效，都显示指针链状态
+    ImGui::Text("BNet: %llX  EvtNode: %llX", info.pBattleNet, info.pEvtNode);
+    ImGui::Text("Lobby: %llX", info.pLobby);
+
+    if (info.valid)
     {
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f),
-            "\xe5\x9c\xb0\xe5\x9b\xbe: %s", lobby.mapPath.c_str());
+            "\xe5\x9c\xb0\xe5\x9b\xbe\xe8\xb7\xaf\xe5\xbe\x84: %s", info.mapPath.c_str());
 
-        if (!lobby.mapDisplayName.empty())
-            ImGui::TextWrapped("\xe6\x8f\x8f\xe8\xbf\xb0: %s", lobby.mapDisplayName.c_str());
+        if (!info.mapName.empty())
+            ImGui::TextWrapped("\xe5\x9c\xb0\xe5\x9b\xbe\xe5\x90\x8d: %s", info.mapName.c_str());
 
         // ─── 地图匹配结果 ───
-        const MapParams* matched = FindMapByKeyword(lobby.mapPath);
+        const MapParams* matched = FindMapByKeyword(info.mapPath);
         if (!matched)
-            matched = FindMapByKeyword(lobby.mapDisplayName);
+            matched = FindMapByKeyword(info.mapName);
         if (matched)
             ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f),
                 "\xe5\x91\xbd\xe4\xb8\xad\xe5\x9c\xb0\xe5\x9b\xbe: %s", matched->keyword);
         else
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
                 "\xe5\x91\xbd\xe4\xb8\xad\xe5\x9c\xb0\xe5\x9b\xbe: \xe6\x9c\xaa\xe5\x8c\xb9\xe9\x85\x8d");
-
-        ImGui::Text("\xe5\x8f\x82\xe6\x95\xb0: %u / %u  \xe6\xa0\x87\xe5\xbf\x97: 0x%X",
-            lobby.gameParam1, lobby.gameParam2, lobby.flags);
-
-        ImGui::Text("\xe7\x8e\xa9\xe5\xae\xb6: %u", lobby.playerCount);
-        for (DWORD i = 0; i < 16; ++i)
-        {
-            if (lobby.playerIds[i])
-                ImGui::Text("  [%u] id=%u", i, lobby.playerIds[i]);
-        }
     }
     else
     {
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
-            "\xe5\xa4\xa7\xe5\x8e\x85: \xe7\xad\x89\xe5\xbe\x85\xe6\x95\xb0\xe6\x8d\xae...");
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+            "\xe5\xa4\xa7\xe5\x8e\x85: \xe6\x8c\x87\xe9\x92\x88\xe9\x93\xbe\xe6\x97\xa0\xe6\x95\x88");
     }
 
     ImGui::End();
@@ -270,14 +264,14 @@ void DrawMinimapOverlay()
         return;
 
     // 获取地图信息，匹配参数
-    LobbyData lobby = SnapshotLobbyData();
-    if (!lobby.valid)
+    LobbyInfo info = ReadLobbyInfo();
+    if (!info.valid)
         return;
 
-    // 优先用 mapPath 匹配，其次 mapDisplayName
-    const MapParams* mp = FindMapByKeyword(lobby.mapPath);
+    // 优先用 mapPath 匹配，其次 mapName
+    const MapParams* mp = FindMapByKeyword(info.mapPath);
     if (!mp)
-        mp = FindMapByKeyword(lobby.mapDisplayName);
+        mp = FindMapByKeyword(info.mapName);
     if (!mp)
         return;
 

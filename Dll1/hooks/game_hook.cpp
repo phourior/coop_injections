@@ -156,3 +156,131 @@ bool SetupGameHooks()
     Log("[+] OnGameLobbyUpdate hook OK\n");
     return true;
 }
+
+// ════════════════════════════════════════════════════════════════
+//  180 精通补丁（特征码定位 + 内联 shellcode）
+// ════════════════════════════════════════════════════════════════
+//
+//  IDA 验证（SC2_x64.exe Base96921，基址 0x140000000）：
+//    0x140EFD6FB  66 89 97 68 01 00 00  mov [rdi+168h], dx   ← 精通值①
+//    0x140EFD702  66 89 8F 6A 01 00 00  mov [rdi+16Ah], cx   ← 精通值②
+//    0x140EFD709  41 FF C7              inc r15d              ← 返回点
+//
+//  特征码（14 字节，全二进制唯一）：
+//    66 89 97 68 01 00 00  66 89 8F 6A 01 00 00
+//
+//  Hook 原理：
+//    将 14 字节替换为 JMP QWORD [RIP+0] + shellcode 地址，
+//    shellcode 将两个字段强制写为 0x7FFF 后跳回 +14 处。
+// ────────────────────────────────────────────────────────────────
+
+static constexpr const char* MASTERY_PATTERN =
+    "66 89 97 68 01 00 00 66 89 8F 6A 01 00 00";
+
+static uintptr_t g_masteryPatchAddr         = 0;
+static uint8_t   g_masteryOrigBytes[14]     = {};
+static void*     g_masteryShellcode         = nullptr;
+static bool      g_masteryEnabled           = false;
+
+bool EnableMasteryMax()
+{
+    if (g_masteryEnabled) return true;
+
+    // ① 特征码定位（懒初始化）
+    if (!g_masteryPatchAddr)
+    {
+        g_masteryPatchAddr = PatternScan("SC2_x64.exe", MASTERY_PATTERN);
+        if (!g_masteryPatchAddr)
+        {
+            Log("[!] EnableMasteryMax: pattern not found\n");
+            return false;
+        }
+        Log("[*] Mastery patch addr: 0x%llX\n", (unsigned long long)g_masteryPatchAddr);
+    }
+
+    // ② 备份原始 14 字节（用于还原）
+    if (!SafeMemcpy(g_masteryOrigBytes,
+                    reinterpret_cast<const void*>(g_masteryPatchAddr), 14))
+    {
+        Log("[!] EnableMasteryMax: backup failed\n");
+        return false;
+    }
+
+    // ③ 分配可执行 shellcode 区域（32 字节）
+    if (!g_masteryShellcode)
+    {
+        g_masteryShellcode = VirtualAlloc(nullptr, 32,
+            MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!g_masteryShellcode)
+        {
+            Log("[!] EnableMasteryMax: VirtualAlloc failed\n");
+            return false;
+        }
+
+        // 返回地址 = patchAddr + 14（inc r15d 处）
+        const uintptr_t returnAddr = g_masteryPatchAddr + 14;
+
+        uint8_t sc[32] = {
+            // MOV WORD PTR [RDI+0x168], 0x7FFF  (9 bytes)
+            0x66, 0xC7, 0x87, 0x68, 0x01, 0x00, 0x00, 0xFF, 0x7F,
+            // MOV WORD PTR [RDI+0x16A], 0x7FFF  (9 bytes)
+            0x66, 0xC7, 0x87, 0x6A, 0x01, 0x00, 0x00, 0xFF, 0x7F,
+            // JMP QWORD PTR [RIP+0]  (6 bytes)
+            0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+            // 64-bit return address  (8 bytes, LE)
+            static_cast<uint8_t>(returnAddr),
+            static_cast<uint8_t>(returnAddr >> 8),
+            static_cast<uint8_t>(returnAddr >> 16),
+            static_cast<uint8_t>(returnAddr >> 24),
+            static_cast<uint8_t>(returnAddr >> 32),
+            static_cast<uint8_t>(returnAddr >> 40),
+            static_cast<uint8_t>(returnAddr >> 48),
+            static_cast<uint8_t>(returnAddr >> 56),
+        };
+        memcpy(g_masteryShellcode, sc, 32);
+        FlushInstructionCache(GetCurrentProcess(), g_masteryShellcode, 32);
+    }
+
+    // ④ 写入 14 字节跳转：FF 25 00 00 00 00 <8-byte shellcode ptr>
+    uint8_t jmp14[14] = { 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 };
+    const uintptr_t scAddr = reinterpret_cast<uintptr_t>(g_masteryShellcode);
+    memcpy(jmp14 + 6, &scAddr, 8);
+
+    DWORD oldProt = 0;
+    if (!VirtualProtect(reinterpret_cast<LPVOID>(g_masteryPatchAddr), 14,
+                        PAGE_EXECUTE_READWRITE, &oldProt))
+    {
+        Log("[!] EnableMasteryMax: VirtualProtect failed\n");
+        return false;
+    }
+    memcpy(reinterpret_cast<void*>(g_masteryPatchAddr), jmp14, 14);
+    VirtualProtect(reinterpret_cast<LPVOID>(g_masteryPatchAddr), 14, oldProt, &oldProt);
+    FlushInstructionCache(GetCurrentProcess(),
+                          reinterpret_cast<LPCVOID>(g_masteryPatchAddr), 14);
+
+    g_masteryEnabled = true;
+    Log("[+] Mastery MAX enabled (pattern-based)\n");
+    return true;
+}
+
+void DisableMasteryMax()
+{
+    if (!g_masteryEnabled || !g_masteryPatchAddr) return;
+
+    DWORD oldProt = 0;
+    if (VirtualProtect(reinterpret_cast<LPVOID>(g_masteryPatchAddr), 14,
+                       PAGE_EXECUTE_READWRITE, &oldProt))
+    {
+        memcpy(reinterpret_cast<void*>(g_masteryPatchAddr), g_masteryOrigBytes, 14);
+        VirtualProtect(reinterpret_cast<LPVOID>(g_masteryPatchAddr), 14, oldProt, &oldProt);
+        FlushInstructionCache(GetCurrentProcess(),
+                              reinterpret_cast<LPCVOID>(g_masteryPatchAddr), 14);
+    }
+    g_masteryEnabled = false;
+    Log("[-] Mastery MAX disabled\n");
+}
+
+bool IsMasteryMaxEnabled()
+{
+    return g_masteryEnabled;
+}

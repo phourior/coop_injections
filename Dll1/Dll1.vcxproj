@@ -146,7 +146,7 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)ext\imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
