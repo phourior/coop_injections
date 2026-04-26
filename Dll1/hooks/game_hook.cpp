@@ -138,7 +138,7 @@ bool SetupGameHooks()
     }
 
     uintptr_t base = reinterpret_cast<uintptr_t>(hModule);
-    uintptr_t targetAddr = base + 0x20BFBE0;
+    uintptr_t targetAddr = base + 0x20C2120;
 
     Log("[*] Hooking OnGameLobbyUpdate at 0x%llX\n", (unsigned long long)targetAddr);
 

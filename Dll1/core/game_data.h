@@ -18,8 +18,21 @@ struct LobbyInfo
     bool         valid;
 };
 
+struct MapBounds
+{
+    float left;
+    float top;
+    float right;
+    float bottom;
+    float width;
+    float height;
+    bool  valid;
+};
+
 // 读取泽拉图神器坐标
 ArtifactCoords ReadArtifactCoords();
+
+MapBounds ReadCurrentMapBounds();
 
 // 读取大厅/地图信息（通过事件链）
 LobbyInfo ReadLobbyInfo();

@@ -3,6 +3,9 @@
 #include "core/memory.h"
 #include "core/log.h"
 
+#include <algorithm>
+#include <cstdlib>
+
 // ─── 泽拉图神器坐标：特征码扫描定位 CameraManager 全局指针 ───
 //
 // 不再硬编码偏移，流程：
@@ -92,6 +95,95 @@ ArtifactCoords ReadArtifactCoords()
     result.y = ReadMemory<float>(addr + 0x6C) + 29.0f;
     result.valid = true;
     return result;
+}
+
+// Runtime camera/map bounds.
+//
+// Base96921 IDA notes:
+//   CameraSetBounds resolves the clamp rectangle through sub_14055CB00.
+//   The getter returns an int32 rect array: minX, minY, maxX, maxY.
+//   Passing 16 selects the global/current map camera clamp used by the native.
+static uintptr_t ScanCameraBoundsGetter()
+{
+    static constexpr const char* kPattern =
+        "8B 05 ?? ?? ?? ?? 2B 05 ?? ?? ?? ?? 8B 15 ?? ?? ?? ?? "
+        "05 E3 6F 3E 6B 03 15 ?? ?? ?? ?? 89 44 24 14 0F B6 C1 "
+        "48 83 C0 1F 89 54 24 10 48 C1 E0 04 48 03 44 24 10 C3";
+
+    return PatternScan("SC2_x64.exe", kPattern);
+}
+
+static bool BuildBoundsFromRect(uintptr_t rect, MapBounds& out)
+{
+    int32_t raw[4] = {};
+    if (!rect || !SafeMemcpy(raw, reinterpret_cast<const void*>(rect), sizeof(raw)))
+        return false;
+
+    int32_t maxAbs = 0;
+    for (int v : raw)
+        maxAbs = (std::max)(maxAbs, abs(v));
+
+    const float scale = (maxAbs > 4096) ? (1.0f / 4096.0f) : 1.0f;
+    const float left   = raw[0] * scale;
+    const float top    = raw[1] * scale;
+    const float right  = raw[2] * scale;
+    const float bottom = raw[3] * scale;
+    const float width  = right - left;
+    const float height = bottom - top;
+
+    if (width < 32.0f || width > 512.0f || height < 32.0f || height > 512.0f)
+        return false;
+    if (left < -64.0f || top < -64.0f || right > 640.0f || bottom > 640.0f)
+        return false;
+
+    out.left = left;
+    out.top = top;
+    out.right = right;
+    out.bottom = bottom;
+    out.width = width;
+    out.height = height;
+    out.valid = true;
+    return true;
+}
+
+using BoundsGetterFn = uintptr_t(__fastcall*)(uint8_t index);
+
+static uintptr_t CallBoundsGetter(uintptr_t getterAddr, uint8_t index)
+{
+    __try
+    {
+        return reinterpret_cast<BoundsGetterFn>(getterAddr)(index);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return 0;
+    }
+}
+
+MapBounds ReadCurrentMapBounds()
+{
+    MapBounds result{};
+
+    static uintptr_t sGetter = ScanCameraBoundsGetter();
+    if (!sGetter)
+        return result;
+
+    auto tryIndex = [&](uint8_t index) -> bool
+    {
+        uintptr_t rect = CallBoundsGetter(sGetter, index);
+        return BuildBoundsFromRect(rect, result);
+    };
+
+    if (tryIndex(16))
+        return result;
+
+    for (uint8_t i = 0; i < 16; ++i)
+    {
+        if (tryIndex(i))
+            return result;
+    }
+
+    return MapBounds{};
 }
 
 // ─── 大厅/地图信息：特征码扫描定位 CBattleNet 全局指针 ───
