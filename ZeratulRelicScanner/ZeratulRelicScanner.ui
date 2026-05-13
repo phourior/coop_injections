@@ -6,162 +6,156 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>700</width>
-    <height>580</height>
+    <width>520</width>
+    <height>440</height>
    </rect>
   </property>
   <property name="minimumSize">
    <size>
-    <width>700</width>
-    <height>580</height>
+    <width>520</width>
+    <height>440</height>
+   </size>
+  </property>
+  <property name="maximumSize">
+   <size>
+    <width>520</width>
+    <height>440</height>
    </size>
   </property>
   <property name="windowTitle">
-   <string>DLL Loader - x64 Process Injector</string>
+   <string>SC2 Loader</string>
   </property>
   <widget class="QWidget" name="centralWidget">
    <layout class="QVBoxLayout" name="verticalLayout">
-    <property name="leftMargin"><number>12</number></property>
-    <property name="topMargin"><number>12</number></property>
-    <property name="rightMargin"><number>12</number></property>
-    <property name="bottomMargin"><number>12</number></property>
+    <property name="leftMargin"><number>16</number></property>
+    <property name="topMargin"><number>16</number></property>
+    <property name="rightMargin"><number>16</number></property>
+    <property name="bottomMargin"><number>16</number></property>
+    <property name="spacing"><number>12</number></property>
     <item>
-     <widget class="QGroupBox" name="groupProcess">
+     <!-- 进程状态区域 -->
+     <widget class="QGroupBox" name="groupStatus">
       <property name="title">
-       <string>目标进程选择</string>
+       <string>SC2 进程监控</string>
       </property>
-      <layout class="QGridLayout" name="gridLayout">
+      <layout class="QGridLayout" name="gridStatus">
+       <property name="leftMargin"><number>12</number></property>
+       <property name="topMargin"><number>16</number></property>
+       <property name="rightMargin"><number>12</number></property>
+       <property name="bottomMargin"><number>12</number></property>
+       <property name="horizontalSpacing"><number>12</number></property>
+       <property name="verticalSpacing"><number>8</number></property>
+
+       <!-- 行0: 进程状态 -->
        <item row="0" column="0">
-        <widget class="QLabel" name="labelProcess">
-         <property name="text">
-          <string>选择进程：</string>
-         </property>
+        <widget class="QLabel" name="labelStatusTitle">
+         <property name="text"><string>进程状态：</string></property>
+         <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
         </widget>
        </item>
        <item row="0" column="1">
-        <widget class="QComboBox" name="comboProcess">
-         <property name="sizePolicy">
-          <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-           <horstretch>0</horstretch>
-           <verstretch>0</verstretch>
-          </sizepolicy>
-         </property>
-         <property name="editable">
-          <bool>true</bool>
-         </property>
+        <widget class="QLabel" name="lblProcessStatus">
+         <property name="text"><string>未运行</string></property>
+         <property name="minimumWidth"><number>80</number></property>
         </widget>
        </item>
        <item row="0" column="2">
-        <widget class="QPushButton" name="btnRefreshProcess">
-         <property name="text">
-          <string>刷新进程</string>
-         </property>
-         <property name="minimumSize">
-          <size>
-           <width>100</width>
-           <height>0</height>
-          </size>
-         </property>
+        <widget class="QLabel" name="labelPidTitle">
+         <property name="text"><string>PID：</string></property>
+         <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
         </widget>
        </item>
+       <item row="0" column="3">
+        <widget class="QLabel" name="lblPid">
+         <property name="text"><string>—</string></property>
+        </widget>
+       </item>
+
+       <!-- 行1: 注入状态 -->
+       <item row="1" column="0">
+        <widget class="QLabel" name="labelInjectTitle">
+         <property name="text"><string>注入状态：</string></property>
+         <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
+        </widget>
+       </item>
+       <item row="1" column="1" colspan="3">
+        <widget class="QLabel" name="lblInjectStatus">
+         <property name="text"><string>未注入</string></property>
+        </widget>
+       </item>
+
+       <!-- 行2: DLL路径 -->
+       <item row="2" column="0">
+        <widget class="QLabel" name="labelDllTitle">
+         <property name="text"><string>DLL 路径：</string></property>
+         <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
+        </widget>
+       </item>
+       <item row="2" column="1" colspan="3">
+        <widget class="QLabel" name="lblDllPath">
+         <property name="text"><string>—</string></property>
+         <property name="wordWrap"><bool>true</bool></property>
+        </widget>
+       </item>
+
       </layout>
      </widget>
     </item>
+
+    <!-- 日志区域 -->
     <item>
-     <widget class="QGroupBox" name="groupDll">
+     <widget class="QGroupBox" name="groupLog">
       <property name="title">
-       <string>DLL 文件管理</string>
+       <string>运行日志</string>
       </property>
-      <layout class="QVBoxLayout" name="verticalLayout_2">
+      <layout class="QVBoxLayout" name="vLayoutLog">
+       <property name="leftMargin"><number>8</number></property>
+       <property name="topMargin"><number>16</number></property>
+       <property name="rightMargin"><number>8</number></property>
+       <property name="bottomMargin"><number>8</number></property>
        <item>
-        <widget class="QTableWidget" name="tableDll">
-         <property name="selectionBehavior">
-          <enum>QAbstractItemView::SelectRows</enum>
-         </property>
-         <property name="editTriggers">
-          <set>QAbstractItemView::NoEditTriggers</set>
-         </property>
-         <property name="alternatingRowColors">
-          <bool>true</bool>
-         </property>
-         <column>
-          <property name="text">
-           <string>DLL文件名</string>
-          </property>
-         </column>
-         <column>
-          <property name="text">
-           <string>路径</string>
-          </property>
-         </column>
+        <widget class="QTextEdit" name="logView">
+         <property name="readOnly"><bool>true</bool></property>
+         <property name="minimumHeight"><number>200</number></property>
         </widget>
-       </item>
-       <item>
-        <layout class="QHBoxLayout" name="hLayoutDllBtns">
-         <item>
-          <widget class="QPushButton" name="btnAddDll">
-           <property name="text">
-            <string>添加 DLL</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QPushButton" name="btnRemoveDll">
-           <property name="text">
-            <string>移除选中</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QPushButton" name="btnClearDll">
-           <property name="text">
-            <string>清空列表</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <spacer name="hSpacer">
-           <property name="orientation">
-            <enum>Qt::Horizontal</enum>
-           </property>
-          </spacer>
-         </item>
-        </layout>
        </item>
       </layout>
      </widget>
     </item>
+
+    <!-- 按钮行 -->
     <item>
-     <layout class="QHBoxLayout" name="hLayoutInject">
+     <layout class="QHBoxLayout" name="hLayoutBtns">
       <item>
        <spacer name="hSpacerLeft">
-        <property name="orientation">
-         <enum>Qt::Horizontal</enum>
-        </property>
+        <property name="orientation"><enum>Qt::Horizontal</enum></property>
        </spacer>
       </item>
       <item>
-       <widget class="QPushButton" name="btnInject">
-        <property name="text">
-         <string>注入 DLL</string>
-        </property>
+       <widget class="QPushButton" name="btnStart">
+        <property name="text"><string>开始监控</string></property>
         <property name="minimumSize">
-         <size>
-          <width>180</width>
-          <height>40</height>
-         </size>
+         <size><width>130</width><height>38</height></size>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="btnStop">
+        <property name="text"><string>停止监控</string></property>
+        <property name="enabled"><bool>false</bool></property>
+        <property name="minimumSize">
+         <size><width>130</width><height>38</height></size>
         </property>
        </widget>
       </item>
       <item>
        <spacer name="hSpacerRight">
-        <property name="orientation">
-         <enum>Qt::Horizontal</enum>
-        </property>
+        <property name="orientation"><enum>Qt::Horizontal</enum></property>
        </spacer>
       </item>
      </layout>
     </item>
+
    </layout>
   </widget>
   <widget class="QStatusBar" name="statusBar"/>

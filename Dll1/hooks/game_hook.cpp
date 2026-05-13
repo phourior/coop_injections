@@ -128,6 +128,25 @@ LobbyData SnapshotLobbyData()
 
 // ─── Public API ───
 
+// ─── OnGameLobbyUpdate 特征码定位（版本无关） ───
+//
+// 历史教训：早期版本硬编码 RVA `base + 0x20C2120` 来 hook `OnGameLobbyUpdate`。
+// 客户端更新（>=Base96999）后，该 RVA 落入 sub_1420C1E60 的中段（函数实际入口
+// 0x1420C1E60，旧 RVA 偏移 +0x2C0），MinHook 覆盖中段指令导致游戏闪退。
+//
+// 解决：扫描函数序言 + 特征常数 `add r8, 0x110`（指针链 a2->24+0x110）锁定入口。
+// 在 Base96999 中匹配唯一地址，第 11 字节（栈帧大小 0xA8）通配以兼容未来版本。
+//
+//   48 8B C4              mov rax, rsp
+//   48 89 48 08           mov [rax+8], rcx
+//   48 81 EC ?? 00 00 00  sub rsp, ??           ; 栈帧（通配，可能随编译器调整）
+//   4C 8B 42 18           mov r8, [rdx+0x18]    ; 取 a2->payload
+//   48 89 58 10           mov [rax+0x10], rbx
+//   49 81 C0 10 01 00 00  add r8, 0x110         ; 唯一特征常数
+static constexpr const char* ON_GAME_LOBBY_UPDATE_PATTERN =
+    "48 8B C4 48 89 48 08 48 81 EC ?? 00 00 00 "
+    "4C 8B 42 18 48 89 58 10 49 81 C0 10 01 00 00";
+
 bool SetupGameHooks()
 {
     HMODULE hModule = GetModuleBase("SC2_x64.exe");
@@ -137,10 +156,15 @@ bool SetupGameHooks()
         return false;
     }
 
-    uintptr_t base = reinterpret_cast<uintptr_t>(hModule);
-    uintptr_t targetAddr = base + 0x20C2120;
+    uintptr_t targetAddr = PatternScan("SC2_x64.exe", ON_GAME_LOBBY_UPDATE_PATTERN);
+    if (!targetAddr)
+    {
+        Log("[!] SetupGameHooks: OnGameLobbyUpdate pattern not found, skipping hook\n");
+        return false;
+    }
 
-    Log("[*] Hooking OnGameLobbyUpdate at 0x%llX\n", (unsigned long long)targetAddr);
+    Log("[*] Hooking OnGameLobbyUpdate at 0x%llX (pattern scan)\n",
+        (unsigned long long)targetAddr);
 
     MH_STATUS st = MH_CreateHook(
         reinterpret_cast<LPVOID>(targetAddr),
@@ -283,4 +307,184 @@ void DisableMasteryMax()
 bool IsMasteryMaxEnabled()
 {
     return g_masteryEnabled;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  NNet UDP 包捕获 hook
+//  IDA 基址 0x140000000，运行时偏移：
+//    sub_142179870  +0x2179870  — UDP 发送适配器（TX）
+//    sub_1401DBE20  +0x01DBE20  — recvfrom 包装（RX）
+//    sub_1413A6FE0  +0x13A6FE0  — 游戏事件发送（事件对象层，TX）
+// ════════════════════════════════════════════════════════════════
+
+volatile LONG  g_nnetHead    = 0;
+NNetPacket     g_nnetRing[NNET_RING_SIZE] = {};
+volatile LONG  g_nnetCapture = 0;
+
+// ─── 原函数指针 ───
+using NNetTxFn   = __int64(__fastcall*)(__int64, const char*, int, const void*);
+using NNetRxFn   = __int64(__fastcall*)(__int64, char*, int, void*, int*);
+using NNetEvtFn  = __int64(__fastcall*)(__int64, void***, const void*);
+
+static NNetTxFn   g_origNNetTx  = nullptr;
+static NNetRxFn   g_origNNetRx  = nullptr;
+static NNetEvtFn  g_origNNetEvt = nullptr;
+
+// ─── 辅助：提取 sockaddr 的 IP/Port 字符串 ───
+// sockaddr 内存布局（AF_INET）：
+//   [0-1] sa_family (小端)   [2-3] port (大端)   [4-7] IPv4
+static void FormatSockAddr(const void* pSa, char* out, int outCap)
+{
+    if (!pSa) { out[0] = '\0'; return; }
+    const unsigned char* sa = static_cast<const unsigned char*>(pSa);
+    int family = sa[0] | (sa[1] << 8);
+    if (family == 2)   // AF_INET
+    {
+        int port = (sa[2] << 8) | sa[3];
+        _snprintf_s(out, outCap, _TRUNCATE,
+            "%d.%d.%d.%d:%d", sa[4], sa[5], sa[6], sa[7], port);
+    }
+    else
+    {
+        _snprintf_s(out, outCap, _TRUNCATE, "fam%d", family);
+    }
+}
+
+// ─── 辅助：向环形缓冲区写入一条记录 ───
+static void NNetRingPush(bool isTx, const char* data, int len, const void* pSa)
+{
+    if (!g_nnetCapture) return;
+    __try
+    {
+        LONG idx = InterlockedIncrement(&g_nnetHead);
+        NNetPacket& p = g_nnetRing[idx % NNET_RING_SIZE];
+        p.isTx   = isTx;
+        p.tickMs = GetTickCount();
+        p.len    = len;
+        int cpLen = len < (int)sizeof(p.data) ? len : (int)sizeof(p.data);
+        if (data && cpLen > 0)
+            memcpy(p.data, data, static_cast<size_t>(cpLen));
+        if (cpLen < (int)sizeof(p.data))
+            memset(p.data + cpLen, 0, sizeof(p.data) - cpLen);
+        FormatSockAddr(pSa, p.addrStr, sizeof(p.addrStr));
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// ─── TX Hook：sub_142179870 ───
+static __int64 __fastcall HookedNNetTx(__int64 socketCtx, const char* data, int len, const void* addr)
+{
+    NNetRingPush(true, data, len, addr);
+    return g_origNNetTx(socketCtx, data, len, addr);
+}
+
+// ─── RX Hook：sub_1401DBE20 ───
+static __int64 __fastcall HookedNNetRx(__int64 socketObj, char* buf, int bufLen, void* from, int* bytesRecv)
+{
+    __int64 ret = g_origNNetRx(socketObj, buf, bufLen, from, bytesRecv);
+    if (ret == 1 && buf && bytesRecv)   // ret==1 表示接收成功
+        NNetRingPush(false, buf, *bytesRecv, from);
+    return ret;
+}
+
+// ─── Event Hook：sub_1413A6FE0  (事件对象层) ───
+static __int64 __fastcall HookedNNetEvt(__int64 a1, void*** a2, const void* a3)
+{
+    __try
+    {
+        if (g_nnetCapture && a2)
+        {
+            uintptr_t vtable = reinterpret_cast<uintptr_t>(*a2);
+            Log("[NNET EVT TX] vtable=0x%llX addr=0x%p\n",
+                (unsigned long long)vtable, a3);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return g_origNNetEvt(a1, a2, a3);
+}
+
+// ─── NNet hook 目标地址（用于运行时启用/禁用） ───
+static uintptr_t g_nnetHookTargets[3] = {};
+
+// ─── 公开安装函数：仅创建 trampoline，不实际启用 ───
+bool SetupNNetHooks()
+{
+    HMODULE hMod = GetModuleBase("SC2_x64.exe");
+    if (!hMod)
+    {
+        Log("[!] SetupNNetHooks: SC2_x64.exe not found\n");
+        return false;
+    }
+    uintptr_t base = reinterpret_cast<uintptr_t>(hMod);
+
+    struct HookEntry {
+        uintptr_t   offset;
+        LPVOID      hookFn;
+        LPVOID*     origFn;
+        const char* name;
+    };
+
+    HookEntry entries[] = {
+        { 0x2179870, reinterpret_cast<LPVOID>(&HookedNNetTx),
+          reinterpret_cast<LPVOID*>(&g_origNNetTx),  "NNetUdpSend" },
+        { 0x01DBE20, reinterpret_cast<LPVOID>(&HookedNNetRx),
+          reinterpret_cast<LPVOID*>(&g_origNNetRx),  "NNetUdpRecv" },
+        { 0x13A6FE0, reinterpret_cast<LPVOID>(&HookedNNetEvt),
+          reinterpret_cast<LPVOID*>(&g_origNNetEvt), "NNetEvtSend" },
+    };
+
+    bool allOk = true;
+    int idx = 0;
+    for (auto& e : entries)
+    {
+        uintptr_t target = base + e.offset;
+        MH_STATUS st = MH_CreateHook(
+            reinterpret_cast<LPVOID>(target), e.hookFn, e.origFn);
+        if (st != MH_OK)
+        {
+            Log("[!] %s hook failed (0x%llX): %s\n",
+                e.name, (unsigned long long)target, MH_StatusToString(st));
+            g_nnetHookTargets[idx] = 0;
+            allOk = false;
+        }
+        else
+        {
+            Log("[+] %s hook created (lazy) at 0x%llX\n",
+                e.name, (unsigned long long)target);
+            g_nnetHookTargets[idx] = target;
+        }
+        ++idx;
+    }
+    return allOk;
+}
+
+// 启动时调用：MH_EnableHook(MH_ALL_HOOKS) 会把 NNet hook 也启用，这里立即关掉
+void DisableNNetHooksAtStartup()
+{
+    for (uintptr_t t : g_nnetHookTargets)
+    {
+        if (t)
+            MH_DisableHook(reinterpret_cast<LPVOID>(t));
+    }
+}
+
+// 运行时开关：用户在 UI 勾选/取消勾选时调用
+void EnableNNetCapture(bool on)
+{
+    if (on)
+    {
+        // 先标记后启用：trampoline 命中时立即可写入环形缓冲
+        InterlockedExchange(&g_nnetCapture, 1);
+        for (uintptr_t t : g_nnetHookTargets)
+            if (t) MH_EnableHook(reinterpret_cast<LPVOID>(t));
+        Log("[+] NNet capture enabled\n");
+    }
+    else
+    {
+        // 先禁用 trampoline 后清标记：彻底回到零开销路径
+        for (uintptr_t t : g_nnetHookTargets)
+            if (t) MH_DisableHook(reinterpret_cast<LPVOID>(t));
+        InterlockedExchange(&g_nnetCapture, 0);
+        Log("[-] NNet capture disabled\n");
+    }
 }

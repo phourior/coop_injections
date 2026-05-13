@@ -1,4 +1,5 @@
 <RCC>
     <qresource prefix="ZeratulRelicScanner">
+        <file>dll1.dll</file>
     </qresource>
 </RCC>

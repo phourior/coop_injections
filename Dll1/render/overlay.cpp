@@ -39,7 +39,7 @@ static HWND FindMainWindowForCurrentProcess()
 
 static LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    if (msg == WM_KEYUP && wParam == VK_SUBTRACT)
+    if (msg == WM_KEYUP && (wParam == VK_F12 || wParam == VK_SUBTRACT))
     {
         g_showMenu = !g_showMenu;
         return 0;

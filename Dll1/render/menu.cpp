@@ -172,7 +172,7 @@ void DrawMenu()
 {
     ImGui::SetNextWindowSize(ImVec2(450, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("泽拉图外挂", &g_showMenu, ImGuiWindowFlags_NoCollapse);
-    ImGui::Text("NumPad- : 开关菜单");
+    ImGui::Text("F12 / NumPad-    : 开关菜单");
     ImGui::Text("END     : 卸载 DLL");
     ImGui::Separator();
 

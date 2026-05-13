@@ -216,6 +216,10 @@ bool SetupHooks()
     if (!SetupGameHooks())
         Log("[!] SetupGameHooks failed (non-fatal, continuing)\n");
 
+    // Hook NNet UDP send/recv for custom map packet capture
+    if (!SetupNNetHooks())
+        Log("[!] SetupNNetHooks failed (non-fatal, continuing)\n");
+
     // Enable all hooks
     st = MH_EnableHook(MH_ALL_HOOKS);
     if (st != MH_OK)
@@ -224,6 +228,10 @@ bool SetupHooks()
         MH_Uninitialize();
         return false;
     }
+
+    // NNet hook 目标在游戏热路径上，默认关闭以避免卡顿；
+    // 用户在菜单勾选 "NNet 包捕获" 时再通过 EnableNNetCapture(true) 启用
+    DisableNNetHooksAtStartup();
 
     Log("[+] D3D9 hooks installed: Present=0x%llX Reset=0x%llX\n",
         static_cast<unsigned long long>(addrs.swapChainPresent),

@@ -105,12 +105,38 @@ ArtifactCoords ReadArtifactCoords()
 //   Passing 16 selects the global/current map camera clamp used by the native.
 static uintptr_t ScanCameraBoundsGetter()
 {
+    // Base96999 (新客户端) 重新内联了部分指令并改了立即数，旧 pattern 失配。
+    // 用通配符屏蔽所有 RIP 相对位移和魔数立即数，仅保留结构性 opcode。
+    //
+    //   8B 05 ?? ?? ?? ??       mov eax, [rip+globalA]
+    //   8B 15 ?? ?? ?? ??       mov edx, [rip+globalB]
+    //   05 ?? ?? ?? ??          add eax, imm32       ; 魔数（每版变）
+    //   03 D0                   add edx, eax
+    //   0F B6 C1                movzx eax, cl
+    //   89 54 24 10             mov [rsp+10], edx
+    //   48 83 C0 1F             add rax, 0x1F
+    //   8B 15 ?? ?? ?? ??       mov edx, [rip+globalC]
+    //   03 15 ?? ?? ?? ??       add edx, [rip+globalD]
+    //   89 54 24 14             mov [rsp+14], edx
+    //   48 C1 E0 04             shl rax, 4
+    //   48 03 44 24 10          add rax, [rsp+10]
+    //   C3                      retn
     static constexpr const char* kPattern =
+        "8B 05 ?? ?? ?? ?? 8B 15 ?? ?? ?? ?? 05 ?? ?? ?? ?? "
+        "03 D0 0F B6 C1 89 54 24 10 48 83 C0 1F "
+        "8B 15 ?? ?? ?? ?? 03 15 ?? ?? ?? ?? 89 54 24 14 "
+        "48 C1 E0 04 48 03 44 24 10 C3";
+
+    uintptr_t hit = PatternScan("SC2_x64.exe", kPattern);
+    if (hit)
+        return hit;
+
+    // 兼容旧客户端（Base96921 及之前）的 pattern
+    static constexpr const char* kLegacy =
         "8B 05 ?? ?? ?? ?? 2B 05 ?? ?? ?? ?? 8B 15 ?? ?? ?? ?? "
         "05 E3 6F 3E 6B 03 15 ?? ?? ?? ?? 89 44 24 14 0F B6 C1 "
         "48 83 C0 1F 89 54 24 10 48 C1 E0 04 48 03 44 24 10 C3";
-
-    return PatternScan("SC2_x64.exe", kPattern);
+    return PatternScan("SC2_x64.exe", kLegacy);
 }
 
 static bool BuildBoundsFromRect(uintptr_t rect, MapBounds& out)
