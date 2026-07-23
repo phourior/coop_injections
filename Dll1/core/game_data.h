@@ -18,6 +18,15 @@ struct LobbyInfo
     bool         valid;
 };
 
+enum class MapBoundsStatus
+{
+    PatternNotFound,
+    GetterReturnedNull,
+    RectReadFailed,
+    RectRejected,
+    Valid,
+};
+
 struct MapBounds
 {
     float left;
@@ -27,12 +36,20 @@ struct MapBounds
     float width;
     float height;
     bool  valid;
+    MapBoundsStatus status;
+    uintptr_t getter;
+    uintptr_t rect;
+    int32_t raw[4];
+    uint8_t index;
 };
 
 // 读取泽拉图神器坐标
 ArtifactCoords ReadArtifactCoords();
 
 MapBounds ReadCurrentMapBounds();
+
+// 定位保存 CBattleNet* 的全局槽地址；返回值需要再解引用一次才能得到对象地址。
+uintptr_t ScanCBattleNetGlobal();
 
 // 读取大厅/地图信息（通过事件链）
 LobbyInfo ReadLobbyInfo();

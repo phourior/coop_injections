@@ -162,8 +162,25 @@ void DrawDebugOverlay()
             bounds.left, bounds.top, bounds.right, bounds.bottom,
             bounds.width, bounds.height);
     else
+    {
+        const char* reason = "unknown";
+        switch (bounds.status)
+        {
+        case MapBoundsStatus::PatternNotFound:     reason = "pattern not found"; break;
+        case MapBoundsStatus::GetterReturnedNull: reason = "getter returned null"; break;
+        case MapBoundsStatus::RectReadFailed:      reason = "rect read failed"; break;
+        case MapBoundsStatus::RectRejected:        reason = "rect rejected"; break;
+        case MapBoundsStatus::Valid:               reason = "valid"; break;
+        }
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
-            "Bounds: invalid");
+            "Bounds: invalid (%s)", reason);
+        ImGui::Text("getter=%p index=%u rect=%p",
+            reinterpret_cast<void*>(bounds.getter),
+            static_cast<unsigned>(bounds.index),
+            reinterpret_cast<void*>(bounds.rect));
+        ImGui::Text("raw: %d, %d, %d, %d",
+            bounds.raw[0], bounds.raw[1], bounds.raw[2], bounds.raw[3]);
+    }
 
     ImGui::End();
 }

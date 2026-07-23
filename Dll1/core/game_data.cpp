@@ -105,6 +105,20 @@ ArtifactCoords ReadArtifactCoords()
 //   Passing 16 selects the global/current map camera clamp used by the native.
 static uintptr_t ScanCameraBoundsGetter()
 {
+    // Base97579:
+    //   mov eax,[globalA]; mov edx,[globalB]; not eax;
+    //   add eax,[globalC]; add edx,[globalD]
+    // 后半段仍是 (uint8(index) + 0x1F) * 16 + computedBase。
+    static constexpr const char* kBase97579 =
+        "8B 05 ?? ?? ?? ?? 8B 15 ?? ?? ?? ?? F7 D0 "
+        "03 05 ?? ?? ?? ?? 03 15 ?? ?? ?? ?? 89 44 24 10 "
+        "0F B6 C1 48 83 C0 ?? 89 54 24 14 48 C1 E0 04 "
+        "48 03 44 24 10 C3";
+
+    uintptr_t hit = PatternScan("SC2_x64.exe", kBase97579);
+    if (hit)
+        return hit;
+
     // Base96999 (新客户端) 重新内联了部分指令并改了立即数，旧 pattern 失配。
     // 用通配符屏蔽所有 RIP 相对位移和魔数立即数，仅保留结构性 opcode。
     //
@@ -114,7 +128,7 @@ static uintptr_t ScanCameraBoundsGetter()
     //   03 D0                   add edx, eax
     //   0F B6 C1                movzx eax, cl
     //   89 54 24 10             mov [rsp+10], edx
-    //   48 83 C0 1F             add rax, 0x1F
+    //   48 83 C0 ??             add rax, slotBias    ; 客户端版本相关
     //   8B 15 ?? ?? ?? ??       mov edx, [rip+globalC]
     //   03 15 ?? ?? ?? ??       add edx, [rip+globalD]
     //   89 54 24 14             mov [rsp+14], edx
@@ -123,11 +137,11 @@ static uintptr_t ScanCameraBoundsGetter()
     //   C3                      retn
     static constexpr const char* kPattern =
         "8B 05 ?? ?? ?? ?? 8B 15 ?? ?? ?? ?? 05 ?? ?? ?? ?? "
-        "03 D0 0F B6 C1 89 54 24 10 48 83 C0 1F "
+        "03 D0 0F B6 C1 89 54 24 10 48 83 C0 ?? "
         "8B 15 ?? ?? ?? ?? 03 15 ?? ?? ?? ?? 89 54 24 14 "
         "48 C1 E0 04 48 03 44 24 10 C3";
 
-    uintptr_t hit = PatternScan("SC2_x64.exe", kPattern);
+    hit = PatternScan("SC2_x64.exe", kPattern);
     if (hit)
         return hit;
 
@@ -135,32 +149,46 @@ static uintptr_t ScanCameraBoundsGetter()
     static constexpr const char* kLegacy =
         "8B 05 ?? ?? ?? ?? 2B 05 ?? ?? ?? ?? 8B 15 ?? ?? ?? ?? "
         "05 E3 6F 3E 6B 03 15 ?? ?? ?? ?? 89 44 24 14 0F B6 C1 "
-        "48 83 C0 1F 89 54 24 10 48 C1 E0 04 48 03 44 24 10 C3";
+        "48 83 C0 ?? 89 54 24 10 48 C1 E0 04 48 03 44 24 10 C3";
     return PatternScan("SC2_x64.exe", kLegacy);
 }
 
 static bool BuildBoundsFromRect(uintptr_t rect, MapBounds& out)
 {
-    int32_t raw[4] = {};
-    if (!rect || !SafeMemcpy(raw, reinterpret_cast<const void*>(rect), sizeof(raw)))
+    out.rect = rect;
+    if (!rect)
+    {
+        out.status = MapBoundsStatus::GetterReturnedNull;
         return false;
+    }
+    if (!SafeMemcpy(out.raw, reinterpret_cast<const void*>(rect), sizeof(out.raw)))
+    {
+        out.status = MapBoundsStatus::RectReadFailed;
+        return false;
+    }
 
     int32_t maxAbs = 0;
-    for (int v : raw)
-        maxAbs = (std::max)(maxAbs, abs(v));
+    for (int32_t value : out.raw)
+        maxAbs = (std::max)(maxAbs, abs(value));
 
     const float scale = (maxAbs > 4096) ? (1.0f / 4096.0f) : 1.0f;
-    const float left   = raw[0] * scale;
-    const float top    = raw[1] * scale;
-    const float right  = raw[2] * scale;
-    const float bottom = raw[3] * scale;
+    const float left   = out.raw[0] * scale;
+    const float top    = out.raw[1] * scale;
+    const float right  = out.raw[2] * scale;
+    const float bottom = out.raw[3] * scale;
     const float width  = right - left;
     const float height = bottom - top;
 
     if (width < 32.0f || width > 512.0f || height < 32.0f || height > 512.0f)
+    {
+        out.status = MapBoundsStatus::RectRejected;
         return false;
+    }
     if (left < -64.0f || top < -64.0f || right > 640.0f || bottom > 640.0f)
+    {
+        out.status = MapBoundsStatus::RectRejected;
         return false;
+    }
 
     out.left = left;
     out.top = top;
@@ -169,6 +197,7 @@ static bool BuildBoundsFromRect(uintptr_t rect, MapBounds& out)
     out.width = width;
     out.height = height;
     out.valid = true;
+    out.status = MapBoundsStatus::Valid;
     return true;
 }
 
@@ -189,13 +218,16 @@ static uintptr_t CallBoundsGetter(uintptr_t getterAddr, uint8_t index)
 MapBounds ReadCurrentMapBounds()
 {
     MapBounds result{};
+    result.status = MapBoundsStatus::PatternNotFound;
 
     static uintptr_t sGetter = ScanCameraBoundsGetter();
+    result.getter = sGetter;
     if (!sGetter)
         return result;
 
     auto tryIndex = [&](uint8_t index) -> bool
     {
+        result.index = index;
         uintptr_t rect = CallBoundsGetter(sGetter, index);
         return BuildBoundsFromRect(rect, result);
     };
@@ -209,7 +241,7 @@ MapBounds ReadCurrentMapBounds()
             return result;
     }
 
-    return MapBounds{};
+    return result;
 }
 
 // ─── 大厅/地图信息：特征码扫描定位 CBattleNet 全局指针 ───
@@ -225,7 +257,7 @@ MapBounds ReadCurrentMapBounds()
 //     +0x08 → mapPath 字符串对象
 //     +0x18 → mapName 字符串对象
 
-static uintptr_t ScanCBattleNetGlobal()
+uintptr_t ScanCBattleNetGlobal()
 {
     auto base = reinterpret_cast<uint8_t*>(GetModuleHandleA("SC2_x64.exe"));
     if (!base) return 0;

@@ -5,7 +5,7 @@
 #include "core/globals.h"
 #include "core/log.h"
 
-#include <MinHook.h>
+#include "ext/MinHook/include/MinHook.h"
 
 // IDirect3DSwapChain9::Present signature
 using SwapChainPresentFn = HRESULT(WINAPI*)(
