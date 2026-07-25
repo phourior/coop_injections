@@ -10,6 +10,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cwchar>
+#include <limits>
 
 // ─── 全局原始数据（纯 C，零初始化） ───
 RawLobbyData g_rawLobby = {};
@@ -515,6 +516,360 @@ void DisableMasteryMax()
 bool IsMasteryMaxEnabled()
 {
     return g_masteryEnabled;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  全图视野补丁
+// ════════════════════════════════════════════════════════════════
+//
+// Base97579 中目标位于 SC2_x64.exe+0x1CD7A79：
+//   48 8D 0D xx xx xx xx    lea rcx, [visibilityTable]
+//   8B 34 81                mov esi, [rcx+rax*4]
+// 补丁把这 10 字节替换为 `mov esi,0FFFFFFFFh` + 5 个 NOP，使后续代码
+// 看到全位掩码。RIP 位移、栈偏移和短跳转距离会随版本变化，因此 pattern
+// 只保留表达控制流/数据流的 opcode。升级流程见 docs/sc2_feature_update_guide.md。
+
+static constexpr const char* FULL_MAP_VISION_PATTERN =
+    "48 8D 0D ?? ?? ?? ?? 8B 34 81 48 89 6C 24 ?? "
+    "41 80 FD 10 74 ?? 44 0F A3 EE";
+
+static constexpr uint8_t FULL_MAP_VISION_PATCH[10] = {
+    0xBE, 0xFF, 0xFF, 0xFF, 0xFF, // mov esi, 0xFFFFFFFF
+    0x90, 0x90, 0x90, 0x90, 0x90,
+};
+
+// 原字节只在首次启用时保存。后续关闭必须恢复同一进程、同一版本的字节，
+// 不能把 Base97579 的原字节硬编码进 DLL。
+static uintptr_t g_fullMapVisionAddr = 0;
+static uint8_t   g_fullMapVisionOrigBytes[10] = {};
+static bool      g_fullMapVisionOrigSaved = false;
+static bool      g_fullMapVisionEnabled = false;
+
+static bool WriteCodeBytes(uintptr_t address, const void* bytes, size_t size)
+{
+    DWORD oldProtect = 0;
+    if (!address || !bytes || !size ||
+        !VirtualProtect(reinterpret_cast<LPVOID>(address), size,
+                        PAGE_EXECUTE_READWRITE, &oldProtect))
+        return false;
+
+    // 修改代码页后恢复原保护，并刷新 CPU 指令缓存；缺少任一步都可能导致
+    // 当前线程继续执行旧指令或留下永久可写的代码页。
+    memcpy(reinterpret_cast<void*>(address), bytes, size);
+
+    DWORD unused = 0;
+    VirtualProtect(reinterpret_cast<LPVOID>(address), size, oldProtect, &unused);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), size);
+    return true;
+}
+
+bool EnableFullMapVision()
+{
+    if (g_fullMapVisionEnabled)
+        return true;
+
+    if (!g_fullMapVisionAddr)
+    {
+        // 特征失配时保持关闭。不要回退到固定 RVA：RVA 只用于分析和日志对照，
+        // SC2 更新后不能证明该位置仍是同一条可见性读取指令。
+        g_fullMapVisionAddr = PatternScan("SC2_x64.exe", FULL_MAP_VISION_PATTERN);
+        if (!g_fullMapVisionAddr)
+        {
+            Log("[!] FullMapVision: pattern not found\n");
+            return false;
+        }
+        Log("[*] FullMapVision patch addr: 0x%llX\n",
+            static_cast<unsigned long long>(g_fullMapVisionAddr));
+    }
+
+    if (!g_fullMapVisionOrigSaved)
+    {
+        if (!SafeMemcpy(g_fullMapVisionOrigBytes,
+                        reinterpret_cast<const void*>(g_fullMapVisionAddr),
+                        sizeof(g_fullMapVisionOrigBytes)))
+        {
+            Log("[!] FullMapVision: backup failed\n");
+            return false;
+        }
+        g_fullMapVisionOrigSaved = true;
+    }
+
+    if (!WriteCodeBytes(g_fullMapVisionAddr, FULL_MAP_VISION_PATCH,
+                        sizeof(FULL_MAP_VISION_PATCH)))
+    {
+        Log("[!] FullMapVision: patch failed\n");
+        return false;
+    }
+
+    g_fullMapVisionEnabled = true;
+    Log("[+] FullMapVision enabled\n");
+    return true;
+}
+
+void DisableFullMapVision()
+{
+    if (!g_fullMapVisionEnabled || !g_fullMapVisionAddr || !g_fullMapVisionOrigSaved)
+        return;
+
+    if (!WriteCodeBytes(g_fullMapVisionAddr, g_fullMapVisionOrigBytes,
+                        sizeof(g_fullMapVisionOrigBytes)))
+    {
+        Log("[!] FullMapVision: restore failed\n");
+        return;
+    }
+
+    g_fullMapVisionEnabled = false;
+    Log("[-] FullMapVision disabled\n");
+}
+
+bool IsFullMapVisionEnabled()
+{
+    return g_fullMapVisionEnabled;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  经验倍率 Hook
+// ════════════════════════════════════════════════════════════════
+//
+// Base97579 有 5 个同源事件处理入口（实现最多容纳 8 个）。这些入口的第三个
+// 参数均为经验 payload，所以每个 detour 只负责选择对应 trampoline，实际修改
+// 统一交给 ScaleExperiencePayload。函数签名、参数位置和 payload 偏移都是
+// 版本契约；新版不能只看 pattern 命中就认定仍然兼容。
+
+using ExperienceFn = __int64(__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+
+static ExperienceFn g_origExperience[8] = {};
+static uintptr_t     g_experienceTargets[8] = {};
+static size_t        g_experienceHookCount = 0;
+static volatile LONG g_experienceEnabled = 0;
+static volatile LONG g_experienceMultiplier = 30;
+
+static void ScaleExperiencePayload(uintptr_t payload)
+{
+    if (!payload || InterlockedCompareExchange(&g_experienceEnabled, 0, 0) == 0)
+        return;
+
+    // Base97579 payload：+0x18 为条目数组，+0x20 为条目数。条目数上限是
+    // 逆向得到的结构约束，也是防止错误 Hook 命中后遍历任意内存的保护条件。
+    uintptr_t entries = 0;
+    uint64_t count = 0;
+    if (!SafeMemcpy(&entries, reinterpret_cast<const void*>(payload + 0x18), sizeof(entries)) ||
+        !SafeMemcpy(&count, reinterpret_cast<const void*>(payload + 0x20), sizeof(count)) ||
+        !entries || count == 0 || count > 16)
+        return;
+
+    const uint64_t multiplier = static_cast<uint64_t>(
+        InterlockedCompareExchange(&g_experienceMultiplier, 0, 0));
+
+    for (uint64_t index = 0; index < count; ++index)
+    {
+        // 每项 0x80 字节；+0x08 是有效标志，+0x09 是非对齐 uint64 经验值。
+        // SC2 升级后若任一偏移变化，必须先更新结构验证，再更新这里。
+        const uintptr_t entry = entries + index * 0x80;
+        uint8_t active = 0;
+        uint64_t value = 0;
+        if (!SafeMemcpy(&active, reinterpret_cast<const void*>(entry + 0x08), sizeof(active)) ||
+            !active ||
+            !SafeMemcpy(&value, reinterpret_cast<const void*>(entry + 0x09), sizeof(value)) ||
+            value == 0)
+            continue;
+
+        // 在整数域做乘法前判断溢出，保持目标 DLL 的 UINT64_MAX 饱和行为。
+        const uint64_t maximum = (std::numeric_limits<uint64_t>::max)();
+        const uint64_t scaled = value > maximum / multiplier
+            ? maximum
+            : value * multiplier;
+        if (scaled != value)
+            SafeMemcpy(reinterpret_cast<void*>(entry + 0x09), &scaled, sizeof(scaled));
+    }
+}
+
+static __int64 CallExperienceOriginal(size_t index, uintptr_t a1, uintptr_t a2,
+                                      uintptr_t payload, uintptr_t a4)
+{
+    // 目标实现是在原函数消费 payload 前修改数据；改成先调用 original 会让
+    // 当前事件仍使用未放大的经验值。
+    ScaleExperiencePayload(payload);
+    ExperienceFn original = g_origExperience[index];
+    return original ? original(a1, a2, payload, a4) : 0;
+}
+
+#define DEFINE_EXPERIENCE_DETOUR(index) \
+    static __int64 __fastcall ExperienceDetour##index( \
+        uintptr_t a1, uintptr_t a2, uintptr_t payload, uintptr_t a4) \
+    { \
+        return CallExperienceOriginal(index, a1, a2, payload, a4); \
+    }
+
+DEFINE_EXPERIENCE_DETOUR(0)
+DEFINE_EXPERIENCE_DETOUR(1)
+DEFINE_EXPERIENCE_DETOUR(2)
+DEFINE_EXPERIENCE_DETOUR(3)
+DEFINE_EXPERIENCE_DETOUR(4)
+DEFINE_EXPERIENCE_DETOUR(5)
+DEFINE_EXPERIENCE_DETOUR(6)
+DEFINE_EXPERIENCE_DETOUR(7)
+
+#undef DEFINE_EXPERIENCE_DETOUR
+
+static LPVOID const EXPERIENCE_DETOURS[8] = {
+    reinterpret_cast<LPVOID>(&ExperienceDetour0),
+    reinterpret_cast<LPVOID>(&ExperienceDetour1),
+    reinterpret_cast<LPVOID>(&ExperienceDetour2),
+    reinterpret_cast<LPVOID>(&ExperienceDetour3),
+    reinterpret_cast<LPVOID>(&ExperienceDetour4),
+    reinterpret_cast<LPVOID>(&ExperienceDetour5),
+    reinterpret_cast<LPVOID>(&ExperienceDetour6),
+    reinterpret_cast<LPVOID>(&ExperienceDetour7),
+};
+
+static size_t FindExperienceTargets(uintptr_t* targets, size_t capacity)
+{
+    HMODULE module = GetModuleBase("SC2_x64.exe");
+    if (!module || !targets || capacity == 0)
+        return 0;
+
+    auto* base = reinterpret_cast<const uint8_t*>(module);
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        return 0;
+    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE)
+        return 0;
+
+    // Base97579 的共享序言。中间 CALL rel32 的 4 字节目标必然受链接布局影响，
+    // 所以扫描器只要求 opcode 为 E8，并从 CALL 后继续匹配稳定的数据流。
+    // 这段模板在当前镜像中有 164 个实例，不能直接取前 8 个；偏移 +0x2B 的
+    // `41 B0 0E` 把经验事件类型 0x0E 装入 r8b，能精确筛出 5 个经验入口。
+    // 0x4480 是当前函数栈帧大小，若编译器重排局部变量，这组特征会安全失配。
+    static constexpr uint8_t prefix[] = {
+        0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18,
+        0x56, 0x57, 0x41, 0x56, 0xB8, 0x80, 0x44, 0x00, 0x00,
+    };
+    static constexpr uint8_t suffix[] = {
+        0x48, 0x2B, 0xE0, 0x49, 0x8B, 0xE8, 0x0F, 0xB6, 0xFA,
+        0x48, 0x8B, 0xF1, 0x48, 0x81, 0xC1, 0x90, 0x01,
+    };
+    static constexpr uint8_t experienceEventType[] = { 0x41, 0xB0, 0x0E };
+    constexpr size_t experienceEventTypeOffset = 0x2B;
+
+    const size_t imageSize = nt->OptionalHeader.SizeOfImage;
+    constexpr size_t requiredSize = experienceEventTypeOffset + sizeof(experienceEventType);
+    size_t found = 0;
+    for (size_t offset = 0; offset + requiredSize <= imageSize && found < capacity; ++offset)
+    {
+        const uint8_t* candidate = base + offset;
+        if (memcmp(candidate, prefix, sizeof(prefix)) != 0 ||
+            candidate[sizeof(prefix)] != 0xE8 ||
+            memcmp(candidate + sizeof(prefix) + 5, suffix, sizeof(suffix)) != 0 ||
+            memcmp(candidate + experienceEventTypeOffset, experienceEventType,
+                   sizeof(experienceEventType)) != 0)
+            continue;
+
+        // 同一入口不得重复收集；跳过完整特征长度还能避免在当前函数序言内部
+        // 再次匹配。当前已验证版本应得到 5 个目标，数量变化必须查看日志复核。
+        targets[found++] = reinterpret_cast<uintptr_t>(candidate);
+        offset += requiredSize - 1;
+    }
+    return found;
+}
+
+bool SetupExperienceHooks()
+{
+    uintptr_t targets[8] = {};
+    const size_t targetCount = FindExperienceTargets(targets, _countof(targets));
+    if (targetCount == 0)
+    {
+        Log("[!] Experience: no hook targets found\n");
+        return false;
+    }
+
+    Log("[*] Experience: found %zu candidate hook target(s)\n", targetCount);
+
+    for (size_t targetIndex = 0; targetIndex < targetCount; ++targetIndex)
+    {
+        const size_t slot = g_experienceHookCount;
+        MH_STATUS status = MH_CreateHook(
+            reinterpret_cast<LPVOID>(targets[targetIndex]),
+            EXPERIENCE_DETOURS[slot],
+            reinterpret_cast<LPVOID*>(&g_origExperience[slot]));
+        if (status != MH_OK)
+        {
+            Log("[!] Experience hook[%zu] failed at 0x%llX: %s\n",
+                targetIndex, static_cast<unsigned long long>(targets[targetIndex]),
+                MH_StatusToString(status));
+            continue;
+        }
+
+        g_experienceTargets[slot] = targets[targetIndex];
+        ++g_experienceHookCount;
+        Log("[+] Experience hook[%zu] created at 0x%llX\n", slot,
+            static_cast<unsigned long long>(targets[targetIndex]));
+    }
+
+    return g_experienceHookCount != 0;
+}
+
+void EnableExperienceMultiplier(bool on)
+{
+    if (on && g_experienceHookCount == 0)
+    {
+        Log("[!] Experience multiplier unavailable: no hooks installed\n");
+        return;
+    }
+
+    if (on)
+    {
+        // SetupHooks() 已调用 MH_EnableHook(MH_ALL_HOOKS)，但某些运行环境中实际
+        // 只观察到第一个经验入口被改写。这里逐个启用已创建的 Hook，确保所有
+        // 同源事件路径都进入 detour；MH_ERROR_ENABLED 表示该入口本来就已启用。
+        for (size_t index = 0; index < g_experienceHookCount; ++index)
+        {
+            MH_STATUS status = MH_EnableHook(
+                reinterpret_cast<LPVOID>(g_experienceTargets[index]));
+            if (status != MH_OK && status != MH_ERROR_ENABLED)
+            {
+                Log("[!] Experience hook[%zu] enable failed at 0x%llX: %s\n",
+                    index,
+                    static_cast<unsigned long long>(g_experienceTargets[index]),
+                    MH_StatusToString(status));
+            }
+        }
+    }
+
+    // 关闭时只清原子状态，不在游戏线程可能执行 trampoline 时移除 Hook。
+    // 所有 trampoline 统一在 CleanupHooks() 中由 MinHook 安全清理。
+    InterlockedExchange(&g_experienceEnabled, on ? 1 : 0);
+    Log("[%c] Experience multiplier %s (%ldx)\n", on ? '+' : '-',
+        on ? "enabled" : "disabled",
+        InterlockedCompareExchange(&g_experienceMultiplier, 0, 0));
+}
+
+bool IsExperienceMultiplierEnabled()
+{
+    return InterlockedCompareExchange(&g_experienceEnabled, 0, 0) != 0;
+}
+
+void SetExperienceMultiplier(float multiplier)
+{
+    LONG value = static_cast<LONG>(multiplier + 0.5f);
+    if (value < 1) value = 1;
+    if (value > 30) value = 30;
+    InterlockedExchange(&g_experienceMultiplier, value);
+}
+
+float GetExperienceMultiplier()
+{
+    return static_cast<float>(InterlockedCompareExchange(&g_experienceMultiplier, 0, 0));
+}
+
+void CleanupGameFeatures()
+{
+    // 必须在 MH_Uninitialize 和 DLL 卸载前执行：先阻止 detour 修改 payload，
+    // 再恢复所有直接写入 SC2 代码段的补丁。
+    EnableExperienceMultiplier(false);
+    DisableFullMapVision();
+    DisableMasteryMax();
 }
 
 // ════════════════════════════════════════════════════════════════

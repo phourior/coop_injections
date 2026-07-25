@@ -216,6 +216,9 @@ bool SetupHooks()
     if (!SetupGameHooks())
         Log("[!] SetupGameHooks failed (non-fatal, continuing)\n");
 
+    if (!SetupExperienceHooks())
+        Log("[!] SetupExperienceHooks failed (non-fatal, continuing)\n");
+
     // Hook NNet UDP send/recv for custom map packet capture
     if (!SetupNNetHooks())
         Log("[!] SetupNNetHooks failed (non-fatal, continuing)\n");
@@ -241,6 +244,7 @@ bool SetupHooks()
 
 void CleanupHooks()
 {
+    CleanupGameFeatures();
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
     ShutdownOverlay();

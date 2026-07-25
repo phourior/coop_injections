@@ -77,3 +77,21 @@ inline bool IsNNetCaptureEnabled()      { return g_nnetCapture != 0; }
 bool EnableMasteryMax();
 void DisableMasteryMax();
 bool IsMasteryMaxEnabled();
+
+// ─── 全图视野补丁（特征码定位，动态开关） ───
+// 找不到已验证特征时返回失败，不使用版本相关的固定 RVA 回退。
+bool EnableFullMapVision();
+void DisableFullMapVision();
+bool IsFullMapVisionEnabled();
+
+// ─── 经验倍率（MinHook，1-30 倍） ───
+// SetupExperienceHooks 必须在 MH_Initialize 之后、MH_EnableHook(MH_ALL_HOOKS)
+// 之前调用；开启时会确保所有已创建入口均启用，关闭时只改变原子状态。
+bool SetupExperienceHooks();
+void EnableExperienceMultiplier(bool on);
+bool IsExperienceMultiplierEnabled();
+void SetExperienceMultiplier(float multiplier);
+float GetExperienceMultiplier();
+
+// 卸载 DLL 前恢复所有直接代码补丁和功能状态。
+void CleanupGameFeatures();

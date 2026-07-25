@@ -201,6 +201,29 @@ void DrawMenu()
         else
             DisableMasteryMax();
     }
+
+    bool fullMapVision = IsFullMapVisionEnabled();
+    if (ImGui::Checkbox("全图视野", &fullMapVision))
+    {
+        if (fullMapVision)
+            EnableFullMapVision();
+        else
+            DisableFullMapVision();
+    }
+
+    bool experienceMultiplier = IsExperienceMultiplierEnabled();
+    if (ImGui::Checkbox("经验倍率", &experienceMultiplier))
+        EnableExperienceMultiplier(experienceMultiplier);
+
+    // 底层只接受整数倍率。保留 SliderFloat 是菜单交互需求，显示和写回时取整，
+    // AlwaysClamp 同时限制 Ctrl+Click 手工输入不能越过 1-30。
+    if (experienceMultiplier)
+    {
+        float multiplier = GetExperienceMultiplier();
+        if (ImGui::SliderFloat("倍率", &multiplier, 1.0f, 30.0f, "%.0f 倍",
+                               ImGuiSliderFlags_AlwaysClamp))
+            SetExperienceMultiplier(std::round(multiplier));
+    }
     ImGui::Separator();
 
     ArtifactCoords acMenu = ReadArtifactCoords();
