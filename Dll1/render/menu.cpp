@@ -210,6 +210,13 @@ void DrawMenu()
         else
             DisableFullMapVision();
     }
+    if (fullMapVision)
+    {
+        const bool applied = IsFullMapVisionApplied();
+        ImGui::TextColored(applied ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f)
+                                   : ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+            applied ? "状态: 已应用" : "状态: 等待支持的合作地图");
+    }
 
     bool experienceMultiplier = IsExperienceMultiplierEnabled();
     if (ImGui::Checkbox("经验倍率", &experienceMultiplier))

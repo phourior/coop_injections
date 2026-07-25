@@ -79,10 +79,12 @@ void DisableMasteryMax();
 bool IsMasteryMaxEnabled();
 
 // ─── 全图视野补丁（特征码定位，动态开关） ───
-// 找不到已验证特征时返回失败，不使用版本相关的固定 RVA 回退。
+// 开启后进入 15 张支持的合作地图时自动应用补丁，离开时自动恢复；地图路径
+// 和显示标识都会参与子串匹配。找不到特征时不使用固定 RVA 回退。
 bool EnableFullMapVision();
 void DisableFullMapVision();
 bool IsFullMapVisionEnabled();
+bool IsFullMapVisionApplied();
 
 // ─── 经验倍率（MinHook，1-30 倍） ───
 // SetupExperienceHooks 必须在 MH_Initialize 之后、MH_EnableHook(MH_ALL_HOOKS)

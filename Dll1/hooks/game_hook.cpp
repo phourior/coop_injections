@@ -19,6 +19,9 @@ RawLobbyData g_rawLobby = {};
 using OnGameLobbyUpdateFn = __int64(__fastcall*)(__int64 a1, __int64 a2);
 static OnGameLobbyUpdateFn g_origOnGameLobbyUpdate = nullptr;
 
+// 全图视野由地图状态机驱动。声明放在大厅 Hook 前，具体补丁实现在下方。
+static void UpdateFullMapVisionMapState(const char* mapPath, const char* mapDesc);
+
 // 反向扫描状态：0=尚未扫描，1=某个 Hook 线程正在扫描，2=扫描完成。
 // 使用 Interlocked API 防止大厅更新由多个线程同时触发时重复遍历内存。
 static volatile LONG g_lobbyReverseScanState = 0;
@@ -274,6 +277,10 @@ static void SafeCollectData(uintptr_t a1)
 
         // 序号最后写（内存屏障），让读取端知道数据已就绪
         InterlockedIncrement(&g_rawLobby.seq);
+
+        // 目标 DLL 同时检查地图路径和显示标识。状态机只在匹配结果发生变化时
+        // 应用或恢复 Fog 补丁，因此频繁的大厅更新不会反复写代码页。
+        UpdateFullMapVisionMapState(mapPath, mapDesc);
 
         // 日志（非 ASCII 替换为 '?'）
         for (int i = 0; mapPath[i]; ++i)
@@ -543,7 +550,31 @@ static constexpr uint8_t FULL_MAP_VISION_PATCH[10] = {
 static uintptr_t g_fullMapVisionAddr = 0;
 static uint8_t   g_fullMapVisionOrigBytes[10] = {};
 static bool      g_fullMapVisionOrigSaved = false;
-static bool      g_fullMapVisionEnabled = false;
+static bool      g_fullMapVisionPatched = false;
+static volatile LONG g_fullMapVisionRequested = 0;
+static volatile LONG g_fullMapVisionMapIndex = -1;
+static SRWLOCK   g_fullMapVisionLock = SRWLOCK_INIT;
+
+// 与逆向目标 DLL 一致，只在这些合作任务地图中自动应用 Fog 补丁。SC2 的两段
+// 标识可能分别保存内部路径和本地化显示名，所以每个名称都同时匹配两段字符串。
+static constexpr const char* FULL_MAP_VISION_MAPS[] = {
+    "虚空撕裂", "克哈裂痕", "虚空降临", "往日神庙", "湮灭快车",
+    "天界封锁", "升格之链", "熔火危机", "机会渺茫", "营救矿工",
+    "亡者之夜", "黑暗杀星", "净网行动", "聚铁成兵", "死亡摇篮",
+};
+
+static int FindFullMapVisionMap(const char* mapPath, const char* mapDesc)
+{
+    const char* path = mapPath ? mapPath : "";
+    const char* desc = mapDesc ? mapDesc : "";
+    for (size_t index = 0; index < _countof(FULL_MAP_VISION_MAPS); ++index)
+    {
+        const char* name = FULL_MAP_VISION_MAPS[index];
+        if (strstr(path, name) || strstr(desc, name))
+            return static_cast<int>(index);
+    }
+    return -1;
+}
 
 static bool WriteCodeBytes(uintptr_t address, const void* bytes, size_t size)
 {
@@ -563,9 +594,9 @@ static bool WriteCodeBytes(uintptr_t address, const void* bytes, size_t size)
     return true;
 }
 
-bool EnableFullMapVision()
+static bool ApplyFullMapVisionPatch()
 {
-    if (g_fullMapVisionEnabled)
+    if (g_fullMapVisionPatched)
         return true;
 
     if (!g_fullMapVisionAddr)
@@ -601,14 +632,14 @@ bool EnableFullMapVision()
         return false;
     }
 
-    g_fullMapVisionEnabled = true;
+    g_fullMapVisionPatched = true;
     Log("[+] FullMapVision enabled\n");
     return true;
 }
 
-void DisableFullMapVision()
+static void RestoreFullMapVisionPatch()
 {
-    if (!g_fullMapVisionEnabled || !g_fullMapVisionAddr || !g_fullMapVisionOrigSaved)
+    if (!g_fullMapVisionPatched || !g_fullMapVisionAddr || !g_fullMapVisionOrigSaved)
         return;
 
     if (!WriteCodeBytes(g_fullMapVisionAddr, g_fullMapVisionOrigBytes,
@@ -618,13 +649,72 @@ void DisableFullMapVision()
         return;
     }
 
-    g_fullMapVisionEnabled = false;
+    g_fullMapVisionPatched = false;
     Log("[-] FullMapVision disabled\n");
+}
+
+static void UpdateFullMapVisionMapState(const char* mapPath, const char* mapDesc)
+{
+    const int nextMap = FindFullMapVisionMap(mapPath, mapDesc);
+    AcquireSRWLockExclusive(&g_fullMapVisionLock);
+    const LONG previousMap = InterlockedExchange(
+        &g_fullMapVisionMapIndex, static_cast<LONG>(nextMap));
+    if (previousMap == nextMap)
+    {
+        ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+        return;
+    }
+
+    if (nextMap >= 0)
+    {
+        if (previousMap >= 0)
+            Log("[*] FullMapVision map left: %s\n", FULL_MAP_VISION_MAPS[previousMap]);
+        Log("[*] FullMapVision map entered: %s\n", FULL_MAP_VISION_MAPS[nextMap]);
+        if (InterlockedCompareExchange(&g_fullMapVisionRequested, 0, 0) != 0)
+            ApplyFullMapVisionPatch();
+    }
+    else
+    {
+        if (previousMap >= 0)
+            Log("[*] FullMapVision map left: %s\n", FULL_MAP_VISION_MAPS[previousMap]);
+        RestoreFullMapVisionPatch();
+    }
+    ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+}
+
+bool EnableFullMapVision()
+{
+    InterlockedExchange(&g_fullMapVisionRequested, 1);
+
+    AcquireSRWLockExclusive(&g_fullMapVisionLock);
+    const LONG mapIndex = InterlockedCompareExchange(&g_fullMapVisionMapIndex, 0, 0);
+    const bool result = mapIndex < 0 || ApplyFullMapVisionPatch();
+    ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+
+    if (mapIndex < 0)
+        Log("[*] FullMapVision armed; waiting for a supported co-op map\n");
+    return result;
+}
+
+void DisableFullMapVision()
+{
+    InterlockedExchange(&g_fullMapVisionRequested, 0);
+    AcquireSRWLockExclusive(&g_fullMapVisionLock);
+    RestoreFullMapVisionPatch();
+    ReleaseSRWLockExclusive(&g_fullMapVisionLock);
 }
 
 bool IsFullMapVisionEnabled()
 {
-    return g_fullMapVisionEnabled;
+    return InterlockedCompareExchange(&g_fullMapVisionRequested, 0, 0) != 0;
+}
+
+bool IsFullMapVisionApplied()
+{
+    AcquireSRWLockShared(&g_fullMapVisionLock);
+    const bool applied = g_fullMapVisionPatched;
+    ReleaseSRWLockShared(&g_fullMapVisionLock);
+    return applied;
 }
 
 // ════════════════════════════════════════════════════════════════

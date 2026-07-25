@@ -5,14 +5,4 @@
   </Configurations>
   <Project Path="ConsoleApplication1/ConsoleApplication1.vcxproj" Id="3eac1103-c5a8-415e-b09f-87a424e7cb6c" />
   <Project Path="Dll1/Dll1.vcxproj" Id="9627ebaa-d73b-4675-9839-00417de3ae4e" />
-  <Project Path="FakeHost/FakeHost.vcxproj" Id="5f7bfe8a-3a5a-4b04-bb4c-1d98c8ea0e24">
-    <Platform Project="x64" />
-  </Project>
-  <Project Path="popUp/popUp.vcxproj" Id="bd88f6b9-67f6-4189-b0b4-88301523583c" />
-  <Project Path="ProcDump/ProcDump.vcxproj" Id="67b8cab2-0499-46ba-8484-fe70707cae43">
-    <Platform Project="x64" />
-  </Project>
-  <Project Path="ZeratulRelicScanner/ZeratulRelicScanner.vcxproj" Id="8398dc83-dbd9-478e-a752-316b9d90036e">
-    <Platform Project="x64" />
-  </Project>
 </Solution>
