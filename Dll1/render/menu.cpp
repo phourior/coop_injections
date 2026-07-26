@@ -25,6 +25,25 @@ static float s_adjustX = 29.0f;
 static float s_adjustY = 6.0f;
 static bool  s_configLoaded = false;
 
+// 神器坐标和地图边界由三个绘制函数共享。渲染帧可以高频调用刷新入口，
+// 但真正的游戏内存读取和边界 getter 每 150 ms 最多执行一次。
+static ArtifactCoords s_cachedArtifactCoords{};
+static MapBounds s_cachedMapBounds{};
+static ULONGLONG s_lastGameDataRefreshTick = 0;
+
+void RefreshOverlayGameData()
+{
+    constexpr ULONGLONG kRefreshIntervalMs = 150;
+    const ULONGLONG now = GetTickCount64();
+    if (s_lastGameDataRefreshTick != 0 &&
+        now - s_lastGameDataRefreshTick < kRefreshIntervalMs)
+        return;
+
+    s_lastGameDataRefreshTick = now;
+    s_cachedArtifactCoords = ReadArtifactCoords();
+    s_cachedMapBounds = ReadCurrentMapBounds();
+}
+
 // ─── JSON 配置文件路径 ───
 static std::string GetConfigPath()
 {
@@ -128,7 +147,7 @@ void DrawDebugOverlay()
     ImGui::Separator();
 
     // ─── 神器坐标（指针链） ───
-    ArtifactCoords ac = ReadArtifactCoords();
+    const ArtifactCoords& ac = s_cachedArtifactCoords;
     if (ac.valid)
         ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.3f, 1.0f),
             "神器坐标: %.1f, %.1f", ac.x, ac.y);
@@ -138,17 +157,12 @@ void DrawDebugOverlay()
 
     ImGui::Separator();
 
-    LobbyInfo info = ReadLobbyInfo();
     std::string displayName;
-    if (info.valid)
-        displayName = !info.mapName.empty() ? info.mapName : info.mapPath;
-
-    if (displayName.empty())
-    {
-        LobbyData lobby = SnapshotLobbyData();
-        if (lobby.valid)
-            displayName = !lobby.mapDisplayName.empty() ? lobby.mapDisplayName : lobby.mapPath;
-    }
+    LobbyData lobby = SnapshotLobbyData();
+    // OnGameLobbyUpdate 的 +0x08 mapPath 保存实际地图标题；+0x18 在部分自定义
+    // 地图中是任务描述。统一使用当前 Hook 快照可避免旧主动链和描述字段误显。
+    if (lobby.valid)
+        displayName = lobby.mapPath;
 
     if (!displayName.empty())
         ImGui::TextWrapped("地图名: %s", displayName.c_str());
@@ -156,7 +170,7 @@ void DrawDebugOverlay()
         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
             "地图名: 未读取");
 
-    MapBounds bounds = ReadCurrentMapBounds();
+    const MapBounds& bounds = s_cachedMapBounds;
     if (bounds.valid)
         ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f),
             "Bounds: L%.1f T%.1f R%.1f B%.1f  %.1f x %.1f",
@@ -234,7 +248,7 @@ void DrawMenu()
     }
     ImGui::Separator();
 
-    ArtifactCoords acMenu = ReadArtifactCoords();
+    const ArtifactCoords& acMenu = s_cachedArtifactCoords;
     if (acMenu.valid)
         ImGui::Text("神器坐标: (%.1f, %.1f)", acMenu.x, acMenu.y);
     else
@@ -275,13 +289,12 @@ void DrawMenu()
 
 void DrawMinimapOverlay()
 {
-    // 获取神器坐标
-    ArtifactCoords ac = ReadArtifactCoords();
+    // 坐标和边界来自同一份 150 ms 共享缓存，避免菜单打开时一帧重复读取。
+    const ArtifactCoords& ac = s_cachedArtifactCoords;
     if (!ac.valid)
         return;
 
-    // Read runtime map bounds instead of matching map names.
-    MapBounds bounds = ReadCurrentMapBounds();
+    const MapBounds& bounds = s_cachedMapBounds;
     if (!bounds.valid)
         return;
 

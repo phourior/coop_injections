@@ -29,9 +29,17 @@ static void UpdateFullMapVisionMapState(const char* mapPath, const char* mapDesc
 // 使用 Interlocked API 防止大厅更新由多个线程同时触发时重复遍历内存。
 static volatile LONG g_lobbyReverseScanState = 0;
 static volatile LONG g_lobbyLogPathReported = 0;
+static SRWLOCK g_lobbyLogOpenLock = SRWLOCK_INIT;
+static bool g_lobbyLogInitialized = false;
+// 反向扫描动态确认的 CBattleNet 当前大厅字段地址。渲染线程只读取该字段，
+// 不把某次客户端版本中观察到的 +0x60 固化为长期偏移。
+static volatile LONG64 g_currentLobbyFieldAddress = 0;
+static volatile LONG64 g_lastLobbyPublishTick = 0;
 
 static HANDLE OpenLobbyScanLog(wchar_t* actualPath, size_t actualPathCount)
 {
+    AcquireSRWLockExclusive(&g_lobbyLogOpenLock);
+
     wchar_t path[MAX_PATH] = {};
     HMODULE self = nullptr;
 
@@ -49,9 +57,12 @@ static HANDLE OpenLobbyScanLog(wchar_t* actualPath, size_t actualPathCount)
             path[0] = L'\0';
     }
 
+    // 每次 DLL 加载后的首次成功打开使用 CREATE_ALWAYS 清空旧日志；后续写入继续追加。
+    // 独占锁防止多个大厅 Hook 线程同时首写时重复截断文件。
+    const DWORD creationDisposition = g_lobbyLogInitialized ? OPEN_ALWAYS : CREATE_ALWAYS;
     HANDLE file = path[0]
         ? CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                      OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)
+                      creationDisposition, FILE_ATTRIBUTE_NORMAL, nullptr)
         : INVALID_HANDLE_VALUE;
 
     // DLL 所在目录不可写时回退到当前用户的临时目录。
@@ -60,14 +71,23 @@ static HANDLE OpenLobbyScanLog(wchar_t* actualPath, size_t actualPathCount)
         DWORD length = GetTempPathW(MAX_PATH, path);
         static constexpr wchar_t kFallbackName[] = L"Dll1_lobby_offsets.log";
         if (!length || length + _countof(kFallbackName) > MAX_PATH)
+        {
+            ReleaseSRWLockExclusive(&g_lobbyLogOpenLock);
             return INVALID_HANDLE_VALUE;
+        }
         wcscpy_s(path + length, MAX_PATH - length, kFallbackName);
         file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                           creationDisposition, FILE_ATTRIBUTE_NORMAL, nullptr);
     }
 
-    if (file != INVALID_HANDLE_VALUE && actualPath && actualPathCount)
-        wcscpy_s(actualPath, actualPathCount, path);
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        g_lobbyLogInitialized = true;
+        if (actualPath && actualPathCount)
+            wcscpy_s(actualPath, actualPathCount, path);
+    }
+
+    ReleaseSRWLockExclusive(&g_lobbyLogOpenLock);
     return file;
 }
 
@@ -134,8 +154,6 @@ static void ReverseScanLobbyPointer(uintptr_t gameLobby)
     int directHits = 0;
     int indirectHits = 0;
     size_t directFieldCandidate = SIZE_MAX;
-    size_t indirectMemberCandidate = SIZE_MAX;
-    size_t indirectValueCandidate = SIZE_MAX;
 
     SYSTEMTIME now = {};
     GetLocalTime(&now);
@@ -179,8 +197,6 @@ static void ReverseScanLobbyPointer(uintptr_t gameLobby)
                 continue;
 
             ++indirectHits;
-            indirectMemberCandidate = fieldOffset;
-            indirectValueCandidate = valueOffset;
             LobbyScanLog("[LOBBY-SCAN] INDIRECT member=CBattleNet+0x%zX -> node=0x%llX, "
                 "GameLobby at node+0x%zX raw=0x%llX\r\n",
                 fieldOffset,
@@ -192,33 +208,19 @@ static void ReverseScanLobbyPointer(uintptr_t gameLobby)
 
     LobbyScanLog("[LOBBY-SCAN] complete: direct=%d indirect=%d\r\n", directHits, indirectHits);
 
-    // 只有唯一布局时才给出明确替换值；多个候选必须结合 IDA xref 再确认。
-    if (directHits == 1 && indirectHits == 0 && directFieldCandidate >= 8)
+    // 唯一的直接命中足以标识 CBattleNet 中保存当前 GameLobby* 的字段；间接
+    // 命中可能只是其他成员指向同一对象内部，不能用于否定这个直接字段。
+    if (directHits == 1 && directFieldCandidate != SIZE_MAX)
     {
-        LobbyScanLog("[LOBBY-SCAN] RECOMMENDATION (embedded node):\r\n"
-            "  ReadLobbyInfo CBattleNet node offset: 0x%zX\r\n"
-            "  EventChainNode GameLobby offset:      0x08\r\n"
-            "  GameLobby mapPath/mapName offsets:    0x08 / 0x18 (unchanged)\r\n"
-            "  pEvtNode = pBattleNet + 0x%zX; // do not dereference here\r\n",
-            directFieldCandidate - 8, directFieldCandidate - 8);
+        const uintptr_t fieldAddress = battleNet + directFieldCandidate;
+        InterlockedExchange64(&g_currentLobbyFieldAddress,
+            static_cast<LONG64>(fieldAddress));
+        LobbyScanLog("[LOBBY-SCAN] current lobby field=0x%llX\r\n",
+            static_cast<unsigned long long>(fieldAddress));
     }
-    else if (indirectHits == 1 && directHits == 0)
-    {
-        LobbyScanLog("[LOBBY-SCAN] RECOMMENDATION (pointer node):\r\n"
-            "  ReadLobbyInfo CBattleNet member offset: 0x%zX\r\n"
-            "  Node GameLobby pointer offset:          0x%zX\r\n"
-            "  GameLobby mapPath/mapName offsets:      0x08 / 0x18 (unchanged)\r\n"
-            "  pEvtNode = ReadMemory<uintptr_t>(pBattleNet + 0x%zX);\r\n",
-            indirectMemberCandidate, indirectValueCandidate, indirectMemberCandidate);
-    }
-    else if (directHits == 0 && indirectHits == 0)
-    {
-        LobbyScanLog("[LOBBY-SCAN] RECOMMENDATION: no matching offset found; do not change ReadLobbyInfo yet.\r\n");
-    }
-    else
-    {
-        LobbyScanLog("[LOBBY-SCAN] RECOMMENDATION: multiple candidates found; do not change ReadLobbyInfo until IDA xrefs confirm one.\r\n");
-    }
+
+    if (directHits != 1)
+        LobbyScanLog("[LOBBY-SCAN] current lobby field unresolved; lifecycle polling disabled\r\n");
 
     // 标记永久完成，后续大厅更新不再进行内存遍历。
     InterlockedExchange(&g_lobbyReverseScanState, 2);
@@ -282,6 +284,8 @@ static void SafeCollectData(uintptr_t a1)
 
         // 序号最后写（内存屏障），让读取端知道数据已就绪
         InterlockedIncrement(&g_rawLobby.seq);
+        InterlockedExchange64(&g_lastLobbyPublishTick,
+            static_cast<LONG64>(GetTickCount64()));
         const LONG publishedSeq = g_rawLobby.seq;
         ReleaseSRWLockExclusive(&g_rawLobbyLock);
 
@@ -335,7 +339,7 @@ LobbyData SnapshotLobbyData()
     memcpy(&snapshot, &g_rawLobby, sizeof(snapshot));
     ReleaseSRWLockShared(&g_rawLobbyLock);
 
-    if (snapshot.seq == 0)
+    if (snapshot.seq == 0 || snapshot.pGameLobby == 0)
         return out;
 
     out.mapPath        = snapshot.mapPath;
@@ -378,6 +382,12 @@ static constexpr const char* ON_GAME_LOBBY_UPDATE_PATTERN =
 
 bool SetupGameHooks()
 {
+    // 在大厅 Hook 启用前立即触发本次 DLL 生命周期的首次打开，确保即使没有进入
+    // 大厅，启动时也会清空上次运行留下的 lobby_offsets.log。
+    HANDLE lobbyLog = OpenLobbyScanLog(nullptr, 0);
+    if (lobbyLog != INVALID_HANDLE_VALUE)
+        CloseHandle(lobbyLog);
+
     HMODULE hModule = GetModuleBase("SC2_x64.exe");
     if (!hModule)
     {
@@ -562,11 +572,18 @@ static volatile LONG g_fullMapVisionMapIndex = -1;
 static SRWLOCK   g_fullMapVisionLock = SRWLOCK_INIT;
 
 // 与逆向目标 DLL 一致，只在这些合作任务地图中自动应用 Fog 补丁。SC2 的两段
-// 标识可能分别保存内部路径和本地化显示名，所以每个名称都同时匹配两段字符串。
+// 标识可能分别保存内部路径和本地化显示名，所以同时保留中文名、英文名及
+// Lock & Load 的内部缩写 LnL，并让每个名称同时匹配两段字符串。
+// 部分 [MM] 地图把“往日神庙”写成了“往曰神庙”，两种字形都需要兼容；
+// 这样即使大厅事件触发时英文标题尚未写入，中文部分也能立即完成匹配。
 static constexpr const char* FULL_MAP_VISION_MAPS[] = {
-    "虚空撕裂", "克哈裂痕", "虚空降临", "往日神庙", "湮灭快车",
+    "虚空撕裂", "克哈裂痕", "虚空降临", "往日神庙", "往曰神庙", "湮灭快车",
     "天界封锁", "升格之链", "熔火危机", "机会渺茫", "营救矿工",
-    "亡者之夜", "黑暗杀星", "净网行动", "聚铁成兵", "死亡摇篮",
+    "亡者之夜", "黑暗杀星", "净网行动", "聚铁成兵", "死亡摇篮", "往昔神庙", "湮灭之源"
+    "Cradle of Death", "Part and Parcel", "Rifts to Korhal", "Scythe of Amon",
+    "Void Thrashing", "Chain of Ascension", "Lock & Load", "Malwarfare",
+    "Mist Opportunities", "Void Launch", "The Vermillion Problem", "Dead of Night",
+    "Oblivion Express", "Miner Evacuation", "Temple of the Past", "LnL",
 };
 
 static int FindFullMapVisionMap(const char* mapPath, const char* mapDesc)
@@ -873,7 +890,7 @@ static void ScaleExperiencePayload(uintptr_t payload)
             continue;
 
         // 在整数域做乘法前判断溢出，保持目标 DLL 的 UINT64_MAX 饱和行为。
-        const uint64_t maximum = (std::numeric_limits<uint64_t>::max)();
+        constexpr uint64_t maximum = (std::numeric_limits<uint64_t>::max)();
         const uint64_t scaled = value > maximum / multiplier
             ? maximum
             : value * multiplier;
@@ -1124,7 +1141,7 @@ static void NNetRingPush(bool isTx, const char* data, int len, const void* pSa)
         LONG idx = InterlockedIncrement(&g_nnetHead);
         NNetPacket& p = g_nnetRing[idx % NNET_RING_SIZE];
         p.isTx   = isTx;
-        p.tickMs = GetTickCount();
+        p.tickMs = GetTickCount64();
         p.len    = len;
         int cpLen = len < (int)sizeof(p.data) ? len : (int)sizeof(p.data);
         if (data && cpLen > 0)

@@ -26,11 +26,13 @@ extern bool          g_showMenu;
 extern SRWLOCK      g_hookCallbackLock;
 extern volatile LONG g_unloading;
 
+_Acquires_shared_lock_(&g_hookCallbackLock)
 inline void EnterHookCallback()
 {
 	AcquireSRWLockShared(&g_hookCallbackLock);
 }
 
+_Releases_shared_lock_(&g_hookCallbackLock)
 inline void LeaveHookCallback()
 {
 	ReleaseSRWLockShared(&g_hookCallbackLock);
@@ -46,6 +48,8 @@ inline void BeginDllUnload()
 	InterlockedExchange(&g_unloading, 1);
 }
 
+_Acquires_exclusive_lock_(&g_hookCallbackLock)
+_Releases_exclusive_lock_(&g_hookCallbackLock)
 inline void WaitForHookCallbacks()
 {
 	AcquireSRWLockExclusive(&g_hookCallbackLock);

@@ -364,3 +364,4 @@ FodyWeavers.xsd
 /py/模式2
 *.bin
 /.vscode
+*.tsv

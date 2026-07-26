@@ -255,7 +255,7 @@ MapBounds ReadCurrentMapBounds()
     return result;
 }
 
-// ─── 大厅/地图信息：特征码扫描定位 CBattleNet 全局指针 ───
+// ─── 大厅诊断：特征码扫描定位 CBattleNet 全局指针 ───
 //
 // 不再硬编码偏移，流程：
 //   1. 在 SC2_x64.exe 镜像内找 "CBattleNet::Initialize()\0" 字节串
@@ -263,10 +263,8 @@ MapBounds ReadCurrentMapBounds()
 //   3. 在 LEA 前 0x100 字节内找最后一条 MOV [RIP+disp32],RSI (48 89 35 ...)
 //   4. 从该 MOV 指令提取 RIP-relative 偏移，得到 qword 全局地址
 //
-// 指针链（版本无关）: *global → CBattleNet*
-//   +0x5A8 → 事件链节点 → +0x08 & ~1 → GameLobby*
-//     +0x08 → mapPath 字符串对象
-//     +0x18 → mapName 字符串对象
+// 扫描结果只用于取得 CBattleNet*。当前大厅数据由 OnGameLobbyUpdate Hook 直接
+// 从其 GameLobby* 参数采集；反向扫描再动态发现 CBattleNet 中的当前大厅字段。
 
 static uintptr_t ScanCBattleNetGlobalUncached()
 {
@@ -319,40 +317,6 @@ uintptr_t ScanCBattleNetGlobal()
 {
     static const uintptr_t address = ScanCBattleNetGlobalUncached();
     return address;
-}
-
-LobbyInfo ReadLobbyInfo()
-{
-    LobbyInfo info{};
-
-    const uintptr_t sCBattleNetGlobal = ScanCBattleNetGlobal();
-    if (!sCBattleNetGlobal)
-        return info;
-
-    // CBattleNet*
-    info.pBattleNet = ReadMemory<uintptr_t>(sCBattleNetGlobal);
-    if (!info.pBattleNet)
-        return info;
-
-    // 事件链头节点
-    info.pEvtNode = ReadMemory<uintptr_t>(info.pBattleNet + 0x5A8);
-    if (!info.pEvtNode)
-        return info;
-
-    // GameLobby* (去掉最低位标志位)
-    uintptr_t raw = ReadMemory<uintptr_t>(info.pEvtNode + 0x08);
-    info.pLobby = raw & ~1ULL;
-    if (!info.pLobby)
-        return info;
-
-    // 地图字符串1 (+0x08 处的字符串对象)
-    info.mapPath = ReadSc2String(info.pLobby + 0x08);
-
-    // 地图字符串2 (+0x18 处的字符串对象)
-    info.mapName = ReadSc2String(info.pLobby + 0x18);
-
-    info.valid = true;
-    return info;
 }
 
 void WarmUpGameDataScans()

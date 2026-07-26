@@ -18,6 +18,8 @@ static constexpr const wchar_t* kTargetExe   = L"SC2_x64.exe";
 static constexpr const wchar_t* kDllName     = L"dll1.dll";
 static constexpr const wchar_t* kInstanceMutexName =
     L"Local\\CoopInjections_SC2_Dll1_Injector";
+static constexpr const wchar_t* kInjectorExitEventName =
+    L"Local\\CoopInjections_SC2_Dll1_InjectorExit";
 
 // Global exit flag (set by Ctrl+C handler)
 static volatile bool g_running = true;
@@ -234,6 +236,17 @@ int main()
         return 1;
     }
 
+    // DLL 在检测到 END 时设置此事件；注入器收到后正常退出并释放单实例互斥量。
+    HANDLE injectorExitEvent = CreateEventW(
+        nullptr, TRUE, FALSE, kInjectorExitEventName);
+    if (!injectorExitEvent)
+    {
+        Logf("[ERROR] Cannot create injector exit event  err=%lu", GetLastError());
+        CloseHandle(instanceMutex);
+        return 1;
+    }
+    ResetEvent(injectorExitEvent);
+
     // Build full DLL path: <exe dir>\dll1.dll
     std::wstring dllPath = GetExeDir() + L'\\' + kDllName;
 
@@ -255,13 +268,13 @@ int main()
 
     Log("Monitoring SC2_x64.exe ... (Ctrl+C to quit)");
 
-    // This injector instance handles each SC2 PID once. END may unload the DLL,
-    // but only a newly started injector instance is allowed to inject it again.
+    // This injector instance handles each SC2 PID once. END unloads the DLL and
+    // signals this injector to exit; a newly started instance may inject again.
     std::unordered_set<DWORD> injectedPids;
     std::unordered_set<DWORD> observedLoadedPids;
     DWORD lastPid = 0;
 
-    while (g_running)
+    while (g_running && WaitForSingleObject(injectorExitEvent, 0) != WAIT_OBJECT_0)
     {
         DWORD pid = FindProcess(kTargetExe);
 
@@ -317,12 +330,19 @@ int main()
             }
         }
 
-        // Sleep in short slices so Ctrl+C is handled quickly
+        // 同时等待 END 退出事件；100 ms 内响应，且 Ctrl+C 处理仍保持及时。
         for (DWORD i = 0; i < kPollIntervalMs / 100 && g_running; ++i)
-            Sleep(100);
+        {
+            if (WaitForSingleObject(injectorExitEvent, 100) == WAIT_OBJECT_0)
+            {
+                g_running = false;
+                break;
+            }
+        }
     }
 
     Log("Monitor stopped.");
+    CloseHandle(injectorExitEvent);
     CloseHandle(instanceMutex);
     return 0;
 }

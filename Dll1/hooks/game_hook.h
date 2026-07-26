@@ -51,7 +51,7 @@ struct NNetPacket
     int    len;           // 数据长度
     BYTE   data[64];      // 前 64 字节原始数据
     char   addrStr[32];   // "ip:port" 字符串
-    DWORD  tickMs;        // GetTickCount() 时间戳
+    ULONGLONG tickMs;     // GetTickCount64() 时间戳
 };
 
 extern volatile LONG  g_nnetHead;            // 环形缓冲区写入头（原子）

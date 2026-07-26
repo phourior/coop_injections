@@ -5,6 +5,23 @@
 #include "core/log.h"
 #include "hooks/d3d9_hook.h"
 
+static constexpr const wchar_t* kInjectorExitEventName =
+    L"Local\\CoopInjections_SC2_Dll1_InjectorExit";
+
+static void RequestInjectorExit()
+{
+    // 注入器持有命名事件；DLL 只发送退出通知，不枚举或强制终止其他进程。
+    HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, kInjectorExitEventName);
+    if (!event)
+    {
+        Log("[!] Injector exit event unavailable  err=%lu\n", GetLastError());
+        return;
+    }
+
+    SetEvent(event);
+    CloseHandle(event);
+}
+
 static DWORD WINAPI MainThread(LPVOID)
 {
     Log("[+] MainThread started. PID=%u\n", GetCurrentProcessId());
@@ -23,6 +40,8 @@ static DWORD WINAPI MainThread(LPVOID)
     while (!(GetAsyncKeyState(VK_END) & 0x8000))
         Sleep(100);
 
+    // END 同时请求唯一注入器实例正常退出，然后再执行 DLL 的安全卸载流程。
+    RequestInjectorExit();
     CleanupHooks();
     FreeLibraryAndExitThread(g_hModule, 0);
     return 0;

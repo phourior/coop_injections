@@ -3,6 +3,7 @@
 #include "render/menu.h"
 #include "core/globals.h"
 #include "core/log.h"
+#include "hooks/game_hook.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx9.h>
@@ -189,10 +190,10 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
     Log("[*] InitOverlay step 3: FindWindow\n");
 
     HWND hwnd = pp.hDeviceWindow;
-    if (!IsWindow(hwnd) || !IsWindowVisible(hwnd))
+    if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd))
         hwnd = FindMainWindowForCurrentProcess();
 
-    if (!IsWindow(hwnd) || !IsWindowVisible(hwnd))
+    if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd))
     {
         Log("[!] No valid window found\n");
         device->Release();
@@ -201,7 +202,13 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
     }
 
     RECT rc{};
-    GetClientRect(hwnd, &rc);
+    if (!GetClientRect(hwnd, &rc))
+    {
+        Log("[!] GetClientRect failed: %u\n", GetLastError());
+        device->Release();
+        s_initInProgress = false;
+        return false;
+    }
     LONG w = rc.right - rc.left, h = rc.bottom - rc.top;
     if (w < 640 || h < 360)
     {
@@ -222,7 +229,7 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
 
     SetLastError(0);
     g_origWndProc = reinterpret_cast<WNDPROC>(
-        SetWindowLongPtrW(g_hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(HookedWndProc)));
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(HookedWndProc)));
     if (!g_origWndProc && GetLastError() != 0)
     {
         Log("[!] SetWindowLongPtrW failed: %u\n", GetLastError());
@@ -320,6 +327,9 @@ void RenderOverlayFrame()
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
+
+    // 神器坐标和地图边界在内部按 150 ms 刷新，所有绘制区域共享该快照。
+    RefreshOverlayGameData();
 
     // 调试信息跟随菜单显示/隐藏
     if (g_showMenu)

@@ -1,5 +1,8 @@
 #pragma once
 
+// Refresh artifact coordinates and map bounds at most once every 150 ms.
+void RefreshOverlayGameData();
+
 // Draw the main ImGui menu. Called each frame when menu is visible.
 void DrawMenu();
 
