@@ -14,3 +14,6 @@ float g_screenHeight = 1080.0f;
 
 volatile bool g_imguiInitialized = false;
 bool          g_showMenu = true;
+
+SRWLOCK       g_hookCallbackLock = SRWLOCK_INIT;
+volatile LONG g_unloading = 0;

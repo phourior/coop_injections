@@ -6,6 +6,9 @@ struct IDirect3DSwapChain9;
 // Returns true on success, false if init should be retried later.
 bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain);
 
+// Stop new window messages from entering the DLL before waiting for callbacks.
+void DetachOverlayWindowProc();
+
 // Shut down ImGui and restore window state.
 void ShutdownOverlay();
 

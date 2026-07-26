@@ -87,41 +87,48 @@ static DWORD FindProcess(const wchar_t* exeName)
 }
 
 // --- DLL injection via remote LoadLibraryW thread ------------------------------
-static bool InjectDll(DWORD pid, const std::wstring& dllPath)
+enum class InjectResult
+{
+    Succeeded,
+    Pending,
+    Failed,
+};
+
+static InjectResult InjectDll(DWORD pid, const std::wstring& dllPath)
 {
     HANDLE hProcess = OpenProcess(
         PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
         PROCESS_VM_OPERATION  | PROCESS_VM_WRITE | PROCESS_VM_READ,
         FALSE, pid);
     if (!hProcess)
-        return false;
+        return InjectResult::Failed;
 
     SIZE_T byteSize = (dllPath.size() + 1) * sizeof(wchar_t);
     LPVOID remoteMem = VirtualAllocEx(hProcess, nullptr, byteSize,
                                       MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remoteMem) {
         CloseHandle(hProcess);
-        return false;
+        return InjectResult::Failed;
     }
 
     if (!WriteProcessMemory(hProcess, remoteMem, dllPath.c_str(), byteSize, nullptr)) {
         VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
         CloseHandle(hProcess);
-        return false;
+        return InjectResult::Failed;
     }
 
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
     if (!hKernel32) {
         VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
         CloseHandle(hProcess);
-        return false;
+        return InjectResult::Failed;
     }
 
     FARPROC pLoadLibraryW = GetProcAddress(hKernel32, "LoadLibraryW");
     if (!pLoadLibraryW) {
         VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
         CloseHandle(hProcess);
-        return false;
+        return InjectResult::Failed;
     }
 
     HANDLE hThread = CreateRemoteThread(hProcess, nullptr, 0,
@@ -131,15 +138,34 @@ static bool InjectDll(DWORD pid, const std::wstring& dllPath)
     if (!hThread) {
         VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
         CloseHandle(hProcess);
-        return false;
+        return InjectResult::Failed;
     }
 
-    WaitForSingleObject(hThread, 8000);
+    const DWORD waitResult = WaitForSingleObject(hThread, 8000);
+    if (waitResult != WAIT_OBJECT_0)
+    {
+        const DWORD error = waitResult == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+        // The remote thread may still be reading dllPath. Leave the allocation in
+        // the target process; it is reclaimed when that process exits.
+        CloseHandle(hThread);
+        CloseHandle(hProcess);
+        SetLastError(error);
+        return InjectResult::Pending;
+    }
 
+    DWORD remoteResult = 0;
+    const BOOL gotResult = GetExitCodeThread(hThread, &remoteResult);
+    const DWORD resultError = gotResult ? ERROR_SUCCESS : GetLastError();
     VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
     CloseHandle(hThread);
     CloseHandle(hProcess);
-    return true;
+
+    if (!gotResult || remoteResult == 0)
+    {
+        SetLastError(gotResult ? ERROR_DLL_INIT_FAILED : resultError);
+        return InjectResult::Failed;
+    }
+    return InjectResult::Succeeded;
 }
 
 // --- main ----------------------------------------------------------------------
@@ -192,9 +218,13 @@ int main()
             if (injectedPids.find(pid) == injectedPids.end())
             {
                 Logf("Injecting dll1.dll -> PID %lu ...", pid);
-                if (InjectDll(pid, dllPath)) {
+                const InjectResult result = InjectDll(pid, dllPath);
+                if (result == InjectResult::Succeeded) {
                     injectedPids.insert(pid);
                     Logf("Injection OK  PID=%lu", pid);
+                } else if (result == InjectResult::Pending) {
+                    injectedPids.insert(pid);
+                    Logf("[WARN] Injection still pending  PID=%lu; automatic retry disabled", pid);
                 } else {
                     DWORD err = GetLastError();
                     Logf("[ERROR] Injection failed  err=%lu  (run as Administrator)", err);

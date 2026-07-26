@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cwchar>
 #include <limits>
+#include <tlhelp32.h>
+#include <vector>
 
 // ─── 全局原始数据（纯 C，零初始化） ───
 RawLobbyData g_rawLobby = {};
@@ -303,17 +305,19 @@ static void SafeCollectData(uintptr_t a1)
 // ─── Hooked OnGameLobbyUpdate ───
 static __int64 __fastcall HookedOnGameLobbyUpdate(__int64 a1, __int64 a2)
 {
+    EnterHookCallback();
     // ① 立即调用原函数——零干扰
     __int64 ret = g_origOnGameLobbyUpdate(a1, a2);
 
     // ② 原函数完成后，以它传入的 GameLobby* 做一次性诊断扫描。
     // ③ 继续执行原有的数据收集；扫描不修改 a1 指向的对象和 g_rawLobby。
-    if (a1)
+    if (!IsDllUnloading() && a1)
     {
         ReverseScanLobbyPointer(static_cast<uintptr_t>(a1));
         SafeCollectData(static_cast<uintptr_t>(a1));
     }
 
+    LeaveHookCallback();
     return ret;
 }
 
@@ -422,6 +426,8 @@ static uint8_t   g_masteryOrigBytes[14]     = {};
 static void*     g_masteryShellcode         = nullptr;
 static bool      g_masteryEnabled           = false;
 
+static bool WriteCodeBytes(uintptr_t address, const void* bytes, size_t size);
+
 bool EnableMasteryMax()
 {
     if (g_masteryEnabled) return true;
@@ -486,17 +492,11 @@ bool EnableMasteryMax()
     const uintptr_t scAddr = reinterpret_cast<uintptr_t>(g_masteryShellcode);
     memcpy(jmp14 + 6, &scAddr, 8);
 
-    DWORD oldProt = 0;
-    if (!VirtualProtect(reinterpret_cast<LPVOID>(g_masteryPatchAddr), 14,
-                        PAGE_EXECUTE_READWRITE, &oldProt))
+    if (!WriteCodeBytes(g_masteryPatchAddr, jmp14, sizeof(jmp14)))
     {
-        Log("[!] EnableMasteryMax: VirtualProtect failed\n");
+        Log("[!] EnableMasteryMax: patch failed\n");
         return false;
     }
-    memcpy(reinterpret_cast<void*>(g_masteryPatchAddr), jmp14, 14);
-    VirtualProtect(reinterpret_cast<LPVOID>(g_masteryPatchAddr), 14, oldProt, &oldProt);
-    FlushInstructionCache(GetCurrentProcess(),
-                          reinterpret_cast<LPCVOID>(g_masteryPatchAddr), 14);
 
     g_masteryEnabled = true;
     Log("[+] Mastery MAX enabled (pattern-based)\n");
@@ -507,14 +507,11 @@ void DisableMasteryMax()
 {
     if (!g_masteryEnabled || !g_masteryPatchAddr) return;
 
-    DWORD oldProt = 0;
-    if (VirtualProtect(reinterpret_cast<LPVOID>(g_masteryPatchAddr), 14,
-                       PAGE_EXECUTE_READWRITE, &oldProt))
+    if (!WriteCodeBytes(g_masteryPatchAddr, g_masteryOrigBytes,
+                        sizeof(g_masteryOrigBytes)))
     {
-        memcpy(reinterpret_cast<void*>(g_masteryPatchAddr), g_masteryOrigBytes, 14);
-        VirtualProtect(reinterpret_cast<LPVOID>(g_masteryPatchAddr), 14, oldProt, &oldProt);
-        FlushInstructionCache(GetCurrentProcess(),
-                              reinterpret_cast<LPCVOID>(g_masteryPatchAddr), 14);
+        Log("[!] DisableMasteryMax: restore failed\n");
+        return;
     }
     g_masteryEnabled = false;
     Log("[-] Mastery MAX disabled\n");
@@ -576,21 +573,121 @@ static int FindFullMapVisionMap(const char* mapPath, const char* mapDesc)
     return -1;
 }
 
+static void ResumeAndCloseThreads(std::vector<HANDLE>& threads)
+{
+    for (auto it = threads.rbegin(); it != threads.rend(); ++it)
+    {
+        ResumeThread(*it);
+        CloseHandle(*it);
+    }
+    threads.clear();
+}
+
+static bool SuspendOtherThreads(uintptr_t protectedAddress, size_t protectedSize,
+                                std::vector<HANDLE>& threads)
+{
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+
+    const DWORD processId = GetCurrentProcessId();
+    const DWORD currentThreadId = GetCurrentThreadId();
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    bool success = Thread32First(snapshot, &entry) != FALSE;
+
+    while (success)
+    {
+        if (entry.th32OwnerProcessID == processId && entry.th32ThreadID != currentThreadId)
+        {
+            HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
+                                           THREAD_QUERY_INFORMATION,
+                                       FALSE, entry.th32ThreadID);
+            if (thread)
+            {
+                if (SuspendThread(thread) == static_cast<DWORD>(-1))
+                {
+                    CloseHandle(thread);
+                    success = false;
+                    break;
+                }
+
+                CONTEXT context{};
+                context.ContextFlags = CONTEXT_CONTROL;
+                if (!GetThreadContext(thread, &context))
+                {
+                    ResumeThread(thread);
+                    CloseHandle(thread);
+                    success = false;
+                    break;
+                }
+
+#ifdef _WIN64
+                const uintptr_t instructionPointer = static_cast<uintptr_t>(context.Rip);
+#else
+                const uintptr_t instructionPointer = static_cast<uintptr_t>(context.Eip);
+#endif
+                if (instructionPointer >= protectedAddress &&
+                    instructionPointer < protectedAddress + protectedSize)
+                {
+                    ResumeThread(thread);
+                    CloseHandle(thread);
+                    success = false;
+                    break;
+                }
+                threads.push_back(thread);
+            }
+            else if (GetLastError() != ERROR_INVALID_PARAMETER)
+            {
+                success = false;
+                break;
+            }
+        }
+
+        if (!Thread32Next(snapshot, &entry))
+            break;
+    }
+
+    CloseHandle(snapshot);
+    if (!success)
+        ResumeAndCloseThreads(threads);
+    return success;
+}
+
 static bool WriteCodeBytes(uintptr_t address, const void* bytes, size_t size)
 {
-    DWORD oldProtect = 0;
+    std::vector<HANDLE> suspendedThreads;
     if (!address || !bytes || !size ||
-        !VirtualProtect(reinterpret_cast<LPVOID>(address), size,
-                        PAGE_EXECUTE_READWRITE, &oldProtect))
+        !SuspendOtherThreads(address, size, suspendedThreads))
         return false;
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(reinterpret_cast<LPVOID>(address), size,
+                        PAGE_EXECUTE_READWRITE, &oldProtect))
+    {
+        ResumeAndCloseThreads(suspendedThreads);
+        return false;
+    }
 
     // 修改代码页后恢复原保护，并刷新 CPU 指令缓存；缺少任一步都可能导致
     // 当前线程继续执行旧指令或留下永久可写的代码页。
     memcpy(reinterpret_cast<void*>(address), bytes, size);
 
     DWORD unused = 0;
-    VirtualProtect(reinterpret_cast<LPVOID>(address), size, oldProtect, &unused);
-    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), size);
+    const bool protectionRestored = VirtualProtect(
+        reinterpret_cast<LPVOID>(address), size, oldProtect, &unused) != FALSE;
+    const bool cacheFlushed = FlushInstructionCache(
+        GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), size) != FALSE;
+    ResumeAndCloseThreads(suspendedThreads);
+    if (!protectionRestored)
+        Log("[!] Code patch committed but page protection restore failed at 0x%llX\n",
+            static_cast<unsigned long long>(address));
+    if (!cacheFlushed)
+        Log("[!] Code patch committed but instruction cache flush failed at 0x%llX\n",
+            static_cast<unsigned long long>(address));
+
+    // The bytes are already committed. Report success so callers retain enough
+    // state to restore them later instead of treating an active patch as disabled.
     return true;
 }
 
@@ -777,11 +874,15 @@ static void ScaleExperiencePayload(uintptr_t payload)
 static __int64 CallExperienceOriginal(size_t index, uintptr_t a1, uintptr_t a2,
                                       uintptr_t payload, uintptr_t a4)
 {
+    EnterHookCallback();
     // 目标实现是在原函数消费 payload 前修改数据；改成先调用 original 会让
     // 当前事件仍使用未放大的经验值。
-    ScaleExperiencePayload(payload);
+    if (!IsDllUnloading())
+        ScaleExperiencePayload(payload);
     ExperienceFn original = g_origExperience[index];
-    return original ? original(a1, a2, payload, a4) : 0;
+    __int64 result = original ? original(a1, a2, payload, a4) : 0;
+    LeaveHookCallback();
+    return result;
 }
 
 #define DEFINE_EXPERIENCE_DETOUR(index) \
@@ -1027,25 +1128,32 @@ static void NNetRingPush(bool isTx, const char* data, int len, const void* pSa)
 // ─── TX Hook：sub_142179870 ───
 static __int64 __fastcall HookedNNetTx(__int64 socketCtx, const char* data, int len, const void* addr)
 {
-    NNetRingPush(true, data, len, addr);
-    return g_origNNetTx(socketCtx, data, len, addr);
+    EnterHookCallback();
+    if (!IsDllUnloading())
+        NNetRingPush(true, data, len, addr);
+    __int64 result = g_origNNetTx(socketCtx, data, len, addr);
+    LeaveHookCallback();
+    return result;
 }
 
 // ─── RX Hook：sub_1401DBE20 ───
 static __int64 __fastcall HookedNNetRx(__int64 socketObj, char* buf, int bufLen, void* from, int* bytesRecv)
 {
+    EnterHookCallback();
     __int64 ret = g_origNNetRx(socketObj, buf, bufLen, from, bytesRecv);
-    if (ret == 1 && buf && bytesRecv)   // ret==1 表示接收成功
+    if (!IsDllUnloading() && ret == 1 && buf && bytesRecv)   // ret==1 表示接收成功
         NNetRingPush(false, buf, *bytesRecv, from);
+    LeaveHookCallback();
     return ret;
 }
 
 // ─── Event Hook：sub_1413A6FE0  (事件对象层) ───
 static __int64 __fastcall HookedNNetEvt(__int64 a1, void*** a2, const void* a3)
 {
+    EnterHookCallback();
     __try
     {
-        if (g_nnetCapture && a2)
+        if (!IsDllUnloading() && g_nnetCapture && a2)
         {
             uintptr_t vtable = reinterpret_cast<uintptr_t>(*a2);
             Log("[NNET EVT TX] vtable=0x%llX addr=0x%p\n",
@@ -1053,62 +1161,24 @@ static __int64 __fastcall HookedNNetEvt(__int64 a1, void*** a2, const void* a3)
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
-    return g_origNNetEvt(a1, a2, a3);
+    __int64 result = g_origNNetEvt(a1, a2, a3);
+    LeaveHookCallback();
+    return result;
 }
 
 // ─── NNet hook 目标地址（用于运行时启用/禁用） ───
 static uintptr_t g_nnetHookTargets[3] = {};
 
-// ─── 公开安装函数：仅创建 trampoline，不实际启用 ───
+// ─── 公开安装函数 ───
 bool SetupNNetHooks()
 {
-    HMODULE hMod = GetModuleBase("SC2_x64.exe");
-    if (!hMod)
-    {
-        Log("[!] SetupNNetHooks: SC2_x64.exe not found\n");
-        return false;
-    }
-    uintptr_t base = reinterpret_cast<uintptr_t>(hMod);
-
-    struct HookEntry {
-        uintptr_t   offset;
-        LPVOID      hookFn;
-        LPVOID*     origFn;
-        const char* name;
-    };
-
-    HookEntry entries[] = {
-        { 0x2179870, reinterpret_cast<LPVOID>(&HookedNNetTx),
-          reinterpret_cast<LPVOID*>(&g_origNNetTx),  "NNetUdpSend" },
-        { 0x01DBE20, reinterpret_cast<LPVOID>(&HookedNNetRx),
-          reinterpret_cast<LPVOID*>(&g_origNNetRx),  "NNetUdpRecv" },
-        { 0x13A6FE0, reinterpret_cast<LPVOID>(&HookedNNetEvt),
-          reinterpret_cast<LPVOID*>(&g_origNNetEvt), "NNetEvtSend" },
-    };
-
-    bool allOk = true;
-    int idx = 0;
-    for (auto& e : entries)
-    {
-        uintptr_t target = base + e.offset;
-        MH_STATUS st = MH_CreateHook(
-            reinterpret_cast<LPVOID>(target), e.hookFn, e.origFn);
-        if (st != MH_OK)
-        {
-            Log("[!] %s hook failed (0x%llX): %s\n",
-                e.name, (unsigned long long)target, MH_StatusToString(st));
-            g_nnetHookTargets[idx] = 0;
-            allOk = false;
-        }
-        else
-        {
-            Log("[+] %s hook created (lazy) at 0x%llX\n",
-                e.name, (unsigned long long)target);
-            g_nnetHookTargets[idx] = target;
-        }
-        ++idx;
-    }
-    return allOk;
+    // The previous implementation used three Base97579 RVAs without validating
+    // the function bodies. A client update can leave those addresses executable
+    // while changing their signatures, making a successful MH_CreateHook unsafe.
+    // Keep capture unavailable until unique byte signatures are recorded and
+    // verified for all three entry points.
+    Log("[!] NNet capture disabled: hook signatures are not verified for this client\n");
+    return false;
 }
 
 // 启动时调用：MH_EnableHook(MH_ALL_HOOKS) 会把 NNet hook 也启用，这里立即关掉
@@ -1126,6 +1196,13 @@ void EnableNNetCapture(bool on)
 {
     if (on)
     {
+        if (!g_nnetHookTargets[0] || !g_nnetHookTargets[1] || !g_nnetHookTargets[2])
+        {
+            InterlockedExchange(&g_nnetCapture, 0);
+            Log("[!] NNet capture unavailable: no verified hooks installed\n");
+            return;
+        }
+
         // 先标记后启用：trampoline 命中时立即可写入环形缓冲
         InterlockedExchange(&g_nnetCapture, 1);
         for (uintptr_t t : g_nnetHookTargets)

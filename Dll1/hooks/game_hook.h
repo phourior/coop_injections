@@ -58,9 +58,8 @@ extern volatile LONG  g_nnetHead;            // 环形缓冲区写入头（原�
 extern NNetPacket     g_nnetRing[NNET_RING_SIZE];
 extern volatile LONG  g_nnetCapture;         // 非零 = 捕获中
 
-// 安装 NNet hook（在 SetupGameHooks 之后调用）
-// 仅 MH_CreateHook，不立即启用——调用方需在 MH_EnableHook 之后再 DisableNNetHooks
-// 默认启动时禁用，避免热路径上每帧都被命中导致游戏卡顿
+// 安装 NNet hook（在 SetupGameHooks 之后调用）。当前缺少可验证的目标函数
+// 特征码，因此安全地返回 false，避免用版本相关固定 RVA 安装 Hook。
 bool SetupNNetHooks();
 
 // 启动时禁用 NNet hook（在 MH_EnableHook(MH_ALL_HOOKS) 之后调用）

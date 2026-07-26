@@ -27,7 +27,9 @@ static HRESULT WINAPI HookedSwapChainPresent(
     const RGNDATA* pDirtyRegion,
     DWORD dwFlags)
 {
-    if (!IsOverlayReady())
+    EnterHookCallback();
+
+    if (!IsDllUnloading() && !IsOverlayReady())
     {
         __try
         {
@@ -39,7 +41,7 @@ static HRESULT WINAPI HookedSwapChainPresent(
         }
     }
 
-    if (IsOverlayReady())
+    if (!IsDllUnloading() && IsOverlayReady())
     {
         __try
         {
@@ -51,8 +53,10 @@ static HRESULT WINAPI HookedSwapChainPresent(
         }
     }
 
-    return g_origSwapChainPresent(
+    HRESULT result = g_origSwapChainPresent(
         pSwapChain, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
+    LeaveHookCallback();
+    return result;
 }
 
 // ─── Hooked Device::Reset ───
@@ -61,17 +65,20 @@ static HRESULT WINAPI HookedDeviceReset(
     IDirect3DDevice9* pDevice,
     D3DPRESENT_PARAMETERS* pPresentationParameters)
 {
+    EnterHookCallback();
     Log("[*] Device::Reset called\n");
 
-    OnDeviceLost();
+    if (!IsDllUnloading())
+        OnDeviceLost();
 
     HRESULT hr = g_origDeviceReset(pDevice, pPresentationParameters);
 
-    if (SUCCEEDED(hr))
+    if (!IsDllUnloading() && SUCCEEDED(hr))
         OnDeviceReset();
-    else
+    else if (!IsDllUnloading())
         Log("[!] Device::Reset failed: 0x%08X\n", hr);
 
+    LeaveHookCallback();
     return hr;
 }
 
@@ -244,8 +251,12 @@ bool SetupHooks()
 
 void CleanupHooks()
 {
-    CleanupGameFeatures();
+    BeginDllUnload();
     MH_DisableHook(MH_ALL_HOOKS);
+    DetachOverlayWindowProc();
+    WaitForHookCallbacks();
+
+    CleanupGameFeatures();
     MH_Uninitialize();
     ShutdownOverlay();
     Log("[+] Hooks cleanup done\n");

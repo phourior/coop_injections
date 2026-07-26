@@ -113,6 +113,7 @@ void DrawDebugOverlay()
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration
         | ImGuiWindowFlags_AlwaysAutoResize
         | ImGuiWindowFlags_NoFocusOnAppearing
+        | ImGuiWindowFlags_NoMouseInputs
         | ImGuiWindowFlags_NoNav
         | ImGuiWindowFlags_NoMove
         | ImGuiWindowFlags_NoSavedSettings;

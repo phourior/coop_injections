@@ -37,18 +37,69 @@ static HWND FindMainWindowForCurrentProcess()
 
 // ─── WndProc hook ───
 
+static bool IsMouseInputMessage(UINT msg)
+{
+    switch (msg)
+    {
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+    case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+    case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+    case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+    case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool IsKeyboardInputMessage(UINT msg)
+{
+    switch (msg)
+    {
+    case WM_KEYDOWN: case WM_KEYUP:
+    case WM_SYSKEYDOWN: case WM_SYSKEYUP:
+    case WM_CHAR: case WM_SYSCHAR:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    EnterHookCallback();
+    WNDPROC originalWndProc = g_origWndProc;
+
+    if (IsDllUnloading())
+    {
+        LRESULT result = CallWindowProcW(originalWndProc, hWnd, msg, wParam, lParam);
+        LeaveHookCallback();
+        return result;
+    }
+
     if (msg == WM_KEYUP && (wParam == VK_F12 || wParam == VK_SUBTRACT))
     {
         g_showMenu = !g_showMenu;
+        LeaveHookCallback();
         return 0;
     }
 
-    if (g_showMenu && ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
-        return TRUE;
+    if (g_showMenu)
+    {
+        ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+        const ImGuiIO& io = ImGui::GetIO();
+        if ((io.WantCaptureMouse && IsMouseInputMessage(msg)) ||
+            (io.WantCaptureKeyboard && IsKeyboardInputMessage(msg)))
+        {
+            LeaveHookCallback();
+            return 0;
+        }
+    }
 
-    return CallWindowProcW(g_origWndProc, hWnd, msg, wParam, lParam);
+    LRESULT result = CallWindowProcW(originalWndProc, hWnd, msg, wParam, lParam);
+    LeaveHookCallback();
+    return result;
 }
 
 // ─── Public API ───
@@ -192,6 +243,12 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
     return true;
 }
 
+void DetachOverlayWindowProc()
+{
+    if (g_origWndProc && g_hWnd)
+        SetWindowLongPtrW(g_hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_origWndProc));
+}
+
 void ShutdownOverlay()
 {
     if (g_imguiInitialized)
@@ -202,8 +259,7 @@ void ShutdownOverlay()
         g_imguiInitialized = false;
     }
 
-    if (g_origWndProc && g_hWnd)
-        SetWindowLongPtrW(g_hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_origWndProc));
+    DetachOverlayWindowProc();
     g_origWndProc = nullptr;
     g_hWnd = nullptr;
 
