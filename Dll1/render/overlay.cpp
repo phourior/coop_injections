@@ -141,7 +141,8 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard
+        | ImGuiConfigFlags_NoMouseCursorChange;
 
     // ─── 加载中文字体（微软雅黑） ───
     {
