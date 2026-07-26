@@ -90,8 +90,62 @@ struct HookAddresses
     uintptr_t deviceReset;      // IDirect3DDevice9::Reset       vtable[16]
 };
 
+static constexpr const wchar_t* kD3D9AddressCache =
+    L"COOP_INJECTIONS_D3D9_HOOK_ADDRESSES";
+
+static bool IsExecutableAddress(uintptr_t address)
+{
+    MEMORY_BASIC_INFORMATION memory{};
+    if (!address || !VirtualQuery(reinterpret_cast<const void*>(address),
+                                  &memory, sizeof(memory)))
+        return false;
+
+    const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return memory.State == MEM_COMMIT && (memory.Protect & executable) != 0 &&
+        (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0;
+}
+
+static HookAddresses LoadCachedD3D9Addresses()
+{
+    wchar_t value[64]{};
+    if (!GetEnvironmentVariableW(kD3D9AddressCache, value, _countof(value)))
+        return {};
+
+    unsigned long long present = 0;
+    unsigned long long reset = 0;
+    if (swscanf_s(value, L"%llx,%llx", &present, &reset) != 2)
+        return {};
+
+    HookAddresses addresses{
+        static_cast<uintptr_t>(present),
+        static_cast<uintptr_t>(reset),
+    };
+    if (!IsExecutableAddress(addresses.swapChainPresent) ||
+        !IsExecutableAddress(addresses.deviceReset))
+        return {};
+
+    Log("[+] Reusing cached D3D9 hooks: Present=0x%llX Reset=0x%llX\n",
+        present, reset);
+    return addresses;
+}
+
+static void CacheD3D9Addresses(const HookAddresses& addresses)
+{
+    wchar_t value[64]{};
+    swprintf_s(value, L"%llX,%llX",
+        static_cast<unsigned long long>(addresses.swapChainPresent),
+        static_cast<unsigned long long>(addresses.deviceReset));
+    if (!SetEnvironmentVariableW(kD3D9AddressCache, value))
+        Log("[!] Failed to cache D3D9 hook addresses: %u\n", GetLastError());
+}
+
 static HookAddresses GetD3D9Addresses()
 {
+    HookAddresses cached = LoadCachedD3D9Addresses();
+    if (cached.swapChainPresent && cached.deviceReset)
+        return cached;
+
     IDirect3D9* d3d9 = Direct3DCreate9(D3D_SDK_VERSION);
     if (!d3d9)
     {
@@ -126,13 +180,32 @@ static HookAddresses GetD3D9Addresses()
     pp.hDeviceWindow = hwnd;
 
     IDirect3DDevice9* device = nullptr;
-    HRESULT hr = d3d9->CreateDevice(
-        D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
-        D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &device);
+    HRESULT hr = D3DERR_DEVICELOST;
+    struct DeviceAttempt
+    {
+        D3DDEVTYPE type;
+        const char* name;
+    };
+    const DeviceAttempt attempts[] = {
+        { D3DDEVTYPE_HAL, "HAL" },
+        { D3DDEVTYPE_REF, "REF" },
+        { D3DDEVTYPE_NULLREF, "NULLREF" },
+    };
+    for (const DeviceAttempt& attempt : attempts)
+    {
+        hr = d3d9->CreateDevice(
+            D3DADAPTER_DEFAULT, attempt.type, hwnd,
+            D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &device);
+        if (device)
+        {
+            Log("[+] Created %s dummy D3D9 device\n", attempt.name);
+            break;
+        }
+        Log("[!] CreateDevice(%s) failed: 0x%08X\n", attempt.name, hr);
+    }
 
     if (FAILED(hr) || !device)
     {
-        Log("[!] CreateDevice failed: 0x%08X\n", hr);
         d3d9->Release();
         DestroyWindow(hwnd);
         UnregisterClassW(kClassName, wc.hInstance);
@@ -157,6 +230,7 @@ static HookAddresses GetD3D9Addresses()
     HookAddresses addrs{};
     addrs.swapChainPresent = reinterpret_cast<uintptr_t>(scVtbl[3]);
     addrs.deviceReset      = reinterpret_cast<uintptr_t>(devVtbl[16]);
+    CacheD3D9Addresses(addrs);
 
     Log("[+] IDirect3DSwapChain9::Present = 0x%llX\n",
         static_cast<unsigned long long>(addrs.swapChainPresent));
@@ -252,12 +326,16 @@ bool SetupHooks()
 void CleanupHooks()
 {
     BeginDllUnload();
-    MH_DisableHook(MH_ALL_HOOKS);
+    const MH_STATUS disableStatus = MH_DisableHook(MH_ALL_HOOKS);
+    if (disableStatus != MH_OK && disableStatus != MH_ERROR_NOT_CREATED)
+        Log("[!] MH_DisableHook cleanup failed: %s\n", MH_StatusToString(disableStatus));
     DetachOverlayWindowProc();
     WaitForHookCallbacks();
 
     CleanupGameFeatures();
-    MH_Uninitialize();
+    const MH_STATUS uninitializeStatus = MH_Uninitialize();
+    if (uninitializeStatus != MH_OK && uninitializeStatus != MH_ERROR_NOT_INITIALIZED)
+        Log("[!] MH_Uninitialize cleanup failed: %s\n", MH_StatusToString(uninitializeStatus));
     ShutdownOverlay();
     Log("[+] Hooks cleanup done\n");
 }

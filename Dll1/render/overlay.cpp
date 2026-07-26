@@ -88,6 +88,12 @@ static bool IsImeCommitMessage(UINT msg)
     return msg == WM_IME_COMPOSITION || msg == WM_IME_CHAR;
 }
 
+static bool IsKeyTransitionMessage(UINT msg)
+{
+    return msg == WM_KEYDOWN || msg == WM_KEYUP ||
+        msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP;
+}
+
 static LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     EnterHookCallback();
@@ -100,9 +106,18 @@ static LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         return result;
     }
 
-    if (msg == WM_KEYUP && (wParam == VK_F12 || wParam == VK_SUBTRACT))
+    const bool isMenuHotkey = wParam == VK_F12 || wParam == VK_SUBTRACT;
+    if (isMenuHotkey && IsKeyTransitionMessage(msg))
     {
-        g_showMenu = !g_showMenu;
+        if (msg == WM_KEYUP || msg == WM_SYSKEYUP)
+            g_showMenu = !g_showMenu;
+        LeaveHookCallback();
+        return 0;
+    }
+
+    // GUI 开启时，END 仍由卸载线程处理，但按键消息不再传给游戏。
+    if (g_showMenu && IsKeyTransitionMessage(msg) && wParam == VK_END)
+    {
         LeaveHookCallback();
         return 0;
     }

@@ -16,6 +16,8 @@
 static constexpr DWORD       kPollIntervalMs = 2000;
 static constexpr const wchar_t* kTargetExe   = L"SC2_x64.exe";
 static constexpr const wchar_t* kDllName     = L"dll1.dll";
+static constexpr const wchar_t* kInstanceMutexName =
+    L"Local\\CoopInjections_SC2_Dll1_Injector";
 
 // Global exit flag (set by Ctrl+C handler)
 static volatile bool g_running = true;
@@ -84,6 +86,50 @@ static DWORD FindProcess(const wchar_t* exeName)
 
     CloseHandle(hSnap);
     return found;
+}
+
+enum class ModuleState
+{
+    Loaded,
+    NotLoaded,
+    Unknown,
+};
+
+static ModuleState GetModuleState(DWORD pid, const wchar_t* moduleName)
+{
+    HANDLE snapshot = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        snapshot = CreateToolhelp32Snapshot(
+            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if (snapshot != INVALID_HANDLE_VALUE || GetLastError() != ERROR_BAD_LENGTH)
+            break;
+    }
+
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return ModuleState::Unknown;
+
+    MODULEENTRY32W module{};
+    module.dwSize = sizeof(module);
+    ModuleState state = ModuleState::NotLoaded;
+    if (Module32FirstW(snapshot, &module))
+    {
+        do
+        {
+            if (_wcsicmp(module.szModule, moduleName) == 0)
+            {
+                state = ModuleState::Loaded;
+                break;
+            }
+        } while (Module32NextW(snapshot, &module));
+    }
+    else
+    {
+        state = ModuleState::Unknown;
+    }
+
+    CloseHandle(snapshot);
+    return state;
 }
 
 // --- DLL injection via remote LoadLibraryW thread ------------------------------
@@ -175,6 +221,19 @@ int main()
 {
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
+    HANDLE instanceMutex = CreateMutexW(nullptr, FALSE, kInstanceMutexName);
+    if (!instanceMutex)
+    {
+        Logf("[ERROR] Cannot create injector mutex  err=%lu", GetLastError());
+        return 1;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        Log("[ERROR] Another injector instance is already running.");
+        CloseHandle(instanceMutex);
+        return 1;
+    }
+
     // Build full DLL path: <exe dir>\dll1.dll
     std::wstring dllPath = GetExeDir() + L'\\' + kDllName;
 
@@ -196,7 +255,10 @@ int main()
 
     Log("Monitoring SC2_x64.exe ... (Ctrl+C to quit)");
 
+    // This injector instance handles each SC2 PID once. END may unload the DLL,
+    // but only a newly started injector instance is allowed to inject it again.
     std::unordered_set<DWORD> injectedPids;
+    std::unordered_set<DWORD> observedLoadedPids;
     DWORD lastPid = 0;
 
     while (g_running)
@@ -207,29 +269,50 @@ int main()
         {
             if (lastPid != 0) {
                 Log("SC2_x64.exe exited.");
+                injectedPids.erase(lastPid);
+                observedLoadedPids.erase(lastPid);
                 lastPid = 0;
             }
         }
         else
         {
             if (pid != lastPid) {
+                if (lastPid != 0)
+                {
+                    injectedPids.erase(lastPid);
+                    observedLoadedPids.erase(lastPid);
+                }
                 lastPid = pid;
                 Logf("Found SC2_x64.exe  PID=%lu", pid);
             }
 
             if (injectedPids.find(pid) == injectedPids.end())
             {
-                Logf("Injecting dll1.dll -> PID %lu ...", pid);
-                const InjectResult result = InjectDll(pid, dllPath);
-                if (result == InjectResult::Succeeded) {
-                    injectedPids.insert(pid);
-                    Logf("Injection OK  PID=%lu", pid);
-                } else if (result == InjectResult::Pending) {
-                    injectedPids.insert(pid);
-                    Logf("[WARN] Injection still pending  PID=%lu; automatic retry disabled", pid);
-                } else {
-                    DWORD err = GetLastError();
-                    Logf("[ERROR] Injection failed  err=%lu  (run as Administrator)", err);
+                const ModuleState moduleState = GetModuleState(pid, kDllName);
+                if (moduleState == ModuleState::Loaded)
+                {
+                    if (observedLoadedPids.insert(pid).second)
+                        Logf("dll1.dll already loaded  PID=%lu; waiting for unload", pid);
+                }
+                else if (moduleState == ModuleState::Unknown)
+                {
+                    Logf("[WARN] Cannot enumerate modules  PID=%lu; injection skipped", pid);
+                }
+                else
+                {
+                    observedLoadedPids.erase(pid);
+                    Logf("Injecting dll1.dll -> PID %lu ...", pid);
+                    const InjectResult result = InjectDll(pid, dllPath);
+                    if (result == InjectResult::Succeeded) {
+                        injectedPids.insert(pid);
+                        Logf("Injection OK  PID=%lu", pid);
+                    } else if (result == InjectResult::Pending) {
+                        injectedPids.insert(pid);
+                        Logf("[WARN] Injection still pending  PID=%lu; automatic retry disabled", pid);
+                    } else {
+                        DWORD err = GetLastError();
+                        Logf("[ERROR] Injection failed  err=%lu  (run as Administrator)", err);
+                    }
                 }
             }
         }
@@ -240,5 +323,6 @@ int main()
     }
 
     Log("Monitor stopped.");
+    CloseHandle(instanceMutex);
     return 0;
 }
