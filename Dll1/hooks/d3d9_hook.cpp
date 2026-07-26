@@ -90,9 +90,13 @@ struct HookAddresses
     uintptr_t deviceReset;      // IDirect3DDevice9::Reset       vtable[16]
 };
 
+// 重复加载修复：缓存保存在 SC2 进程环境中，因此 DLL 卸载后仍然存在，
+// SC2 进程退出时又会自动失效，不会把一个进程的绝对地址带到下一个进程。
 static constexpr const wchar_t* kD3D9AddressCache =
     L"COOP_INJECTIONS_D3D9_HOOK_ADDRESSES";
 
+// 复用缓存前确认地址仍指向已提交的可执行页面，避免损坏或过期的环境变量
+// 被直接交给 MinHook。
 static bool IsExecutableAddress(uintptr_t address)
 {
     MEMORY_BASIC_INFORMATION memory{};
@@ -106,6 +110,8 @@ static bool IsExecutableAddress(uintptr_t address)
         (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0;
 }
 
+    // 第二次及后续加载优先复用第一次解析出的虚表地址，避免在已有游戏设备
+    // 运行时创建另一个 HAL 设备并持续收到 D3DERR_DEVICELOST。
 static HookAddresses LoadCachedD3D9Addresses()
 {
     wchar_t value[64]{};
@@ -130,6 +136,8 @@ static HookAddresses LoadCachedD3D9Addresses()
     return addresses;
 }
 
+// SetEnvironmentVariableW 修改的是当前 SC2 进程环境；它不依赖 DLL 自身的
+// 静态存储，所以 FreeLibrary 后仍可供下一次注入读取。
 static void CacheD3D9Addresses(const HookAddresses& addresses)
 {
     wchar_t value[64]{};
@@ -181,6 +189,8 @@ static HookAddresses GetD3D9Addresses()
 
     IDirect3DDevice9* device = nullptr;
     HRESULT hr = D3DERR_DEVICELOST;
+    // 首次解析仍需临时设备。优先使用与游戏一致的 HAL；若 HAL 被当前显示
+    // 状态占用，则依次尝试不占用硬件显示设备的 REF 和 NULLREF。
     struct DeviceAttempt
     {
         D3DDEVTYPE type;
@@ -230,6 +240,8 @@ static HookAddresses GetD3D9Addresses()
     HookAddresses addrs{};
     addrs.swapChainPresent = reinterpret_cast<uintptr_t>(scVtbl[3]);
     addrs.deviceReset      = reinterpret_cast<uintptr_t>(devVtbl[16]);
+    // 必须在释放临时设备前保存函数入口，使同一 SC2 进程后续重载不再依赖
+    // 临时设备能否创建成功。
     CacheD3D9Addresses(addrs);
 
     Log("[+] IDirect3DSwapChain9::Present = 0x%llX\n",
