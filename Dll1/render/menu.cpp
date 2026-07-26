@@ -189,7 +189,7 @@ void DrawDebugOverlay()
 void DrawMenu()
 {
     ImGui::SetNextWindowSize(ImVec2(450, 0), ImGuiCond_FirstUseEver);
-    ImGui::Begin("泽拉图外挂", &g_showMenu, ImGuiWindowFlags_NoCollapse);
+    ImGui::Begin("合作外挂", &g_showMenu, ImGuiWindowFlags_NoCollapse);
     ImGui::Text("F12 / NumPad-    : 开关菜单");
     ImGui::Text("END     : 卸载 DLL");
     ImGui::Separator();
@@ -252,16 +252,20 @@ void DrawMenu()
 
     ImGui::Separator();
     ImGui::Text("小地图校准:");
-    bool changed = false;
-    changed |= ImGui::SliderFloat("X 偏移", &s_adjustX, -75.0f, 75.0f, "%.0f px");
-    changed |= ImGui::SliderFloat("Y 偏移", &s_adjustY, -75.0f, 75.0f, "%.0f px");
+    // 审查修复 #7：拖动期间只更新内存值，控件结束编辑后才落盘，避免每帧
+    // 打开、覆盖并关闭配置文件。
+    bool saveConfig = false;
+    ImGui::SliderFloat("X 偏移", &s_adjustX, -75.0f, 75.0f, "%.0f px");
+    saveConfig |= ImGui::IsItemDeactivatedAfterEdit();
+    ImGui::SliderFloat("Y 偏移", &s_adjustY, -75.0f, 75.0f, "%.0f px");
+    saveConfig |= ImGui::IsItemDeactivatedAfterEdit();
     if (ImGui::Button("重置"))
     {
         s_adjustX = 29.0f;
         s_adjustY = 6.0f;
-        changed = true;
+        saveConfig = true;
     }
-    if (changed)
+    if (saveConfig)
         SaveOffsetConfig();
 
     ImGui::End();

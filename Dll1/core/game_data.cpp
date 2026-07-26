@@ -73,12 +73,17 @@ static uintptr_t ScanCameraManagerGlobal()
     return 0;
 }
 
+static uintptr_t GetCameraManagerGlobal()
+{
+    static const uintptr_t address = ScanCameraManagerGlobal();
+    return address;
+}
+
 ArtifactCoords ReadArtifactCoords()
 {
     ArtifactCoords result{ 0.f, 0.f, false };
 
-    // 首次调用时扫描，结果缓存（C++11 静态局部变量线程安全初始化）
-    static uintptr_t sCamGlobal = ScanCameraManagerGlobal();
+    const uintptr_t sCamGlobal = GetCameraManagerGlobal();
     if (!sCamGlobal)
         return result;
 
@@ -153,6 +158,12 @@ static uintptr_t ScanCameraBoundsGetter()
     return PatternScan("SC2_x64.exe", kLegacy);
 }
 
+static uintptr_t GetCameraBoundsGetter()
+{
+    static const uintptr_t address = ScanCameraBoundsGetter();
+    return address;
+}
+
 static bool BuildBoundsFromRect(uintptr_t rect, MapBounds& out)
 {
     out.rect = rect;
@@ -220,7 +231,7 @@ MapBounds ReadCurrentMapBounds()
     MapBounds result{};
     result.status = MapBoundsStatus::PatternNotFound;
 
-    static uintptr_t sGetter = ScanCameraBoundsGetter();
+    const uintptr_t sGetter = GetCameraBoundsGetter();
     result.getter = sGetter;
     if (!sGetter)
         return result;
@@ -257,7 +268,7 @@ MapBounds ReadCurrentMapBounds()
 //     +0x08 → mapPath 字符串对象
 //     +0x18 → mapName 字符串对象
 
-uintptr_t ScanCBattleNetGlobal()
+static uintptr_t ScanCBattleNetGlobalUncached()
 {
     auto base = reinterpret_cast<uint8_t*>(GetModuleHandleA("SC2_x64.exe"));
     if (!base) return 0;
@@ -304,12 +315,17 @@ uintptr_t ScanCBattleNetGlobal()
     return 0;
 }
 
+uintptr_t ScanCBattleNetGlobal()
+{
+    static const uintptr_t address = ScanCBattleNetGlobalUncached();
+    return address;
+}
+
 LobbyInfo ReadLobbyInfo()
 {
     LobbyInfo info{};
 
-    // 首次调用时扫描，结果缓存（C++11 静态局部变量线程安全初始化）
-    static uintptr_t sCBattleNetGlobal = ScanCBattleNetGlobal();
+    const uintptr_t sCBattleNetGlobal = ScanCBattleNetGlobal();
     if (!sCBattleNetGlobal)
         return info;
 
@@ -337,4 +353,15 @@ LobbyInfo ReadLobbyInfo()
 
     info.valid = true;
     return info;
+}
+
+void WarmUpGameDataScans()
+{
+    const uintptr_t camera = GetCameraManagerGlobal();
+    const uintptr_t bounds = GetCameraBoundsGetter();
+    const uintptr_t battleNet = ScanCBattleNetGlobal();
+    Log("[*] Game-data scans ready: camera=0x%llX bounds=0x%llX battleNet=0x%llX\n",
+        static_cast<unsigned long long>(camera),
+        static_cast<unsigned long long>(bounds),
+        static_cast<unsigned long long>(battleNet));
 }

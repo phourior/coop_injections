@@ -16,6 +16,7 @@
 
 // ─── 全局原始数据（纯 C，零初始化） ───
 RawLobbyData g_rawLobby = {};
+static SRWLOCK g_rawLobbyLock = SRWLOCK_INIT;
 
 // ─── 原函数类型 ───
 using OnGameLobbyUpdateFn = __int64(__fastcall*)(__int64 a1, __int64 a2);
@@ -268,7 +269,9 @@ static void SafeCollectData(uintptr_t a1)
         SafeMemcpy(&lobbyFlags, reinterpret_cast<const void*>(a1 + 0x1EC8), 4);
         SafeMemcpy(playerIds, reinterpret_cast<const void*>(a1 + 0x1C10), sizeof(playerIds));
 
-        // 一次性写入全局结构（纯 memcpy，无堆分配）
+        // 审查修复 #8：Hook 写入与 UI 快照通过同一 SRW 锁同步，保证一次
+        // 快照中的地图、参数和玩家字段来自同一次发布。
+        AcquireSRWLockExclusive(&g_rawLobbyLock);
         memcpy(g_rawLobby.mapPath, mapPath, sizeof(mapPath));
         memcpy(g_rawLobby.mapDesc, mapDesc, sizeof(mapDesc));
         g_rawLobby.gameParam1  = gp1;
@@ -279,6 +282,8 @@ static void SafeCollectData(uintptr_t a1)
 
         // 序号最后写（内存屏障），让读取端知道数据已就绪
         InterlockedIncrement(&g_rawLobby.seq);
+        const LONG publishedSeq = g_rawLobby.seq;
+        ReleaseSRWLockExclusive(&g_rawLobbyLock);
 
         // 目标 DLL 同时检查地图路径和显示标识。状态机只在匹配结果发生变化时
         // 应用或恢复 Fog 补丁，因此频繁的大厅更新不会反复写代码页。
@@ -294,7 +299,7 @@ static void SafeCollectData(uintptr_t a1)
             if (playerIds[i]) ++activePlayers;
 
         Log("[LOBBY #%ld] map='%.200s' p=%u/%u f=0x%X players=%d\n",
-            g_rawLobby.seq, mapPath, gp1, gp2, lobbyFlags, activePlayers);
+            publishedSeq, mapPath, gp1, gp2, lobbyFlags, activePlayers);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -325,20 +330,24 @@ static __int64 __fastcall HookedOnGameLobbyUpdate(__int64 a1, __int64 a2)
 LobbyData SnapshotLobbyData()
 {
     LobbyData out;
-    LONG seq = g_rawLobby.seq;
-    if (seq == 0)
+    RawLobbyData snapshot{};
+    AcquireSRWLockShared(&g_rawLobbyLock);
+    memcpy(&snapshot, &g_rawLobby, sizeof(snapshot));
+    ReleaseSRWLockShared(&g_rawLobbyLock);
+
+    if (snapshot.seq == 0)
         return out;
 
-    out.mapPath        = g_rawLobby.mapPath;
-    out.mapDisplayName = g_rawLobby.mapDesc;
-    out.gameParam1     = g_rawLobby.gameParam1;
-    out.gameParam2     = g_rawLobby.gameParam2;
-    out.flags          = g_rawLobby.flags;
+    out.mapPath        = snapshot.mapPath;
+    out.mapDisplayName = snapshot.mapDesc;
+    out.gameParam1     = snapshot.gameParam1;
+    out.gameParam2     = snapshot.gameParam2;
+    out.flags          = snapshot.flags;
 
     out.playerCount = 0;
     for (int i = 0; i < 16; ++i)
     {
-        out.playerIds[i] = g_rawLobby.playerIds[i];
+        out.playerIds[i] = snapshot.playerIds[i];
         if (out.playerIds[i]) out.playerCount++;
     }
 
@@ -656,6 +665,8 @@ static bool SuspendOtherThreads(uintptr_t protectedAddress, size_t protectedSize
 
 static bool WriteCodeBytes(uintptr_t address, const void* bytes, size_t size)
 {
+    // 审查修复 #3：改写游戏指令前暂停其他线程并检查 RIP，避免任何 CPU
+    // 执行到半新半旧的补丁字节。
     std::vector<HANDLE> suspendedThreads;
     if (!address || !bytes || !size ||
         !SuspendOtherThreads(address, size, suspendedThreads))
@@ -1172,6 +1183,8 @@ static uintptr_t g_nnetHookTargets[3] = {};
 // ─── 公开安装函数 ───
 bool SetupNNetHooks()
 {
+    // 审查修复 #4：旧实现的固定 RVA 没有函数签名验证；客户端更新后即使
+    // MH_CreateHook 成功也可能按错误原型调用，因此缺少唯一特征码时安全禁用。
     // The previous implementation used three Base97579 RVAs without validating
     // the function bodies. A client update can leave those addresses executable
     // while changing their signatures, making a successful MH_CreateHook unsafe.

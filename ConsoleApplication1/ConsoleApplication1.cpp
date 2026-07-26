@@ -141,6 +141,8 @@ static InjectResult InjectDll(DWORD pid, const std::wstring& dllPath)
         return InjectResult::Failed;
     }
 
+    // 审查修复 #5：只有远程 LoadLibraryW 完成且返回非零才报告成功；超时
+    // 时保留远程参数并标记 Pending，避免释放后使用和重复创建远程线程。
     const DWORD waitResult = WaitForSingleObject(hThread, 8000);
     if (waitResult != WAIT_OBJECT_0)
     {

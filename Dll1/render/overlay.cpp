@@ -35,6 +35,23 @@ static HWND FindMainWindowForCurrentProcess()
     return data.hwnd;
 }
 
+static void UpdateScreenSize(HWND hWnd)
+{
+    // 审查修复 #10：窗口化切换和 D3D Reset 后重新读取客户区，避免小地图
+    // 坐标继续使用初始化时的旧分辨率。
+    RECT clientRect{};
+    if (!hWnd || !GetClientRect(hWnd, &clientRect))
+        return;
+
+    const LONG width = clientRect.right - clientRect.left;
+    const LONG height = clientRect.bottom - clientRect.top;
+    if (width > 0 && height > 0)
+    {
+        g_screenWidth = static_cast<float>(width);
+        g_screenHeight = static_cast<float>(height);
+    }
+}
+
 // ─── WndProc hook ───
 
 static bool IsMouseInputMessage(UINT msg)
@@ -66,6 +83,11 @@ static bool IsKeyboardInputMessage(UINT msg)
     }
 }
 
+static bool IsImeCommitMessage(UINT msg)
+{
+    return msg == WM_IME_COMPOSITION || msg == WM_IME_CHAR;
+}
+
 static LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     EnterHookCallback();
@@ -85,10 +107,19 @@ static LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM
         return 0;
     }
 
+    if (msg == WM_SIZE && wParam != SIZE_MINIMIZED)
+        UpdateScreenSize(hWnd);
+
     if (g_showMenu)
     {
-        ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+        // ImGui's Win32 backend calls DefWindowProcW for WM_IME_COMPOSITION.
+        // Forwarding that same message to the game's WndProc commits IME text twice.
+        // This overlay has no IME text field, so leave IME commits exclusively to the game.
+        if (!IsImeCommitMessage(msg))
+            ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
         const ImGuiIO& io = ImGui::GetIO();
+        // 审查修复 #2：只吞掉 ImGui 明确捕获的输入；其余消息继续交给游戏。
+        // 左上调试窗使用 NoMouseInputs，因此只有右侧交互菜单会触发鼠标捕获。
         if ((io.WantCaptureMouse && IsMouseInputMessage(msg)) ||
             (io.WantCaptureKeyboard && IsKeyboardInputMessage(msg)))
         {
@@ -202,7 +233,7 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
         fontCfg.OversampleV = 1;
         fontCfg.PixelSnapH  = true;
 
-        // 包含完整中日韩统一表意文字 + 基本拉丁字符
+        // 地图名可能包含繁体汉字、日文假名及其他 CJK 字符，必须保留完整范围。
         static const ImWchar ranges[] = {
             0x0020, 0x00FF, // Basic Latin + Latin Supplement
             0x2000, 0x206F, // General Punctuation
@@ -210,7 +241,7 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
             0x31F0, 0x31FF, // Katakana Phonetic Extensions
             0xFF00, 0xFFEF, // Halfwidth and Fullwidth Forms
             0x4E00, 0x9FFF, // CJK Unified Ideographs
-            0, 
+            0,
         };
 
         ImFont* font = io.Fonts->AddFontFromFileTTF(
@@ -286,18 +317,9 @@ void RenderOverlayFrame()
     ImGui::EndFrame();
     ImGui::Render();
 
-    IDirect3DStateBlock9* stateBlock = nullptr;
-    g_device->CreateStateBlock(D3DSBT_ALL, &stateBlock);
-    if (stateBlock)
-        stateBlock->Capture();
-
+    // 审查修复 #6：DX9 后端内部已保存并恢复完整设备状态，不再在外层
+    // 创建第二个 D3DSBT_ALL StateBlock。
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
-
-    if (stateBlock)
-    {
-        stateBlock->Apply();
-        stateBlock->Release();
-    }
 }
 
 void OnDeviceLost()
@@ -308,6 +330,7 @@ void OnDeviceLost()
 
 void OnDeviceReset()
 {
+    UpdateScreenSize(g_hWnd);
     if (g_imguiInitialized)
         ImGui_ImplDX9_CreateDeviceObjects();
 }

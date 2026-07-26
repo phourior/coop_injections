@@ -1,12 +1,17 @@
 // dllmain.cpp : DLL entry point
 #include "pch.h"
 #include "core/globals.h"
+#include "core/game_data.h"
 #include "core/log.h"
 #include "hooks/d3d9_hook.h"
 
 static DWORD WINAPI MainThread(LPVOID)
 {
     Log("[+] MainThread started. PID=%u\n", GetCurrentProcessId());
+
+    // 审查修复 #9：在安装渲染 Hook 前由工作线程完成并缓存模块扫描，避免
+    // 第一次 Present 在游戏渲染线程上承担全镜像扫描开销。
+    WarmUpGameDataScans();
 
     if (!SetupHooks())
     {

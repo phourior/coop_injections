@@ -48,6 +48,9 @@ ArtifactCoords ReadArtifactCoords();
 
 MapBounds ReadCurrentMapBounds();
 
+// Resolve and cache module scan results on the DLL worker thread before rendering.
+void WarmUpGameDataScans();
+
 // 定位保存 CBattleNet* 的全局槽地址；返回值需要再解引用一次才能得到对象地址。
 uintptr_t ScanCBattleNetGlobal();
 

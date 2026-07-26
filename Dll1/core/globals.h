@@ -21,8 +21,8 @@ extern float g_screenHeight;
 extern volatile bool g_imguiInitialized;
 extern bool          g_showMenu;
 
-// Hook callbacks hold this gate for their complete lifetime. Unload first closes
-// the entry points, then takes the gate exclusively before freeing DLL resources.
+// 审查修复 #1：每个 Hook 回调全程持有共享门；卸载先关闭入口，再独占等待，
+// 防止 trampoline、ImGui 或 DLL 代码仍在执行时被释放。
 extern SRWLOCK      g_hookCallbackLock;
 extern volatile LONG g_unloading;
 
