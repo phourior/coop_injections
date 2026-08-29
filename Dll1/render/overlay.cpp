@@ -289,7 +289,6 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;
     // 鼠标指针修复：禁止 ImGui 根据悬停控件修改 Win32 系统指针样式，
     // 避免它与游戏自身的指针更新互相覆盖而造成指针反复横跳。
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard
