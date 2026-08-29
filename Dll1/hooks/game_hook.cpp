@@ -579,7 +579,7 @@ static SRWLOCK   g_fullMapVisionLock = SRWLOCK_INIT;
 static constexpr const char* FULL_MAP_VISION_MAPS[] = {
     "虚空撕裂", "克哈裂痕", "虚空降临", "往日神庙", "往曰神庙", "湮灭快车",
     "天界封锁", "升格之链", "熔火危机", "机会渺茫", "营救矿工",
-    "亡者之夜", "黑暗杀星", "净网行动", "聚铁成兵", "死亡摇篮", "往昔神庙", "湮灭之源"
+    "亡者之夜", "黑暗杀星", "净网行动", "聚铁成兵", "死亡摇篮", "往昔神庙", "湮灭之源","旧忆神庙",
     "Cradle of Death", "Part and Parcel", "Rifts to Korhal", "Scythe of Amon",
     "Void Thrashing", "Chain of Ascension", "Lock & Load", "Malwarfare",
     "Mist Opportunities", "Void Launch", "The Vermillion Problem", "Dead of Night",

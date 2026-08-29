@@ -41,6 +41,7 @@
 //  2018-02-06: Misc: Removed call to ImGui::Shutdown() which is not available from 1.60 WIP, user needs to call CreateContext/DestroyContext themselves.
 
 #include "imgui.h"
+#include "core/log.h"
 #ifndef IMGUI_DISABLE
 #include "imgui_impl_dx9.h"
 
@@ -85,6 +86,15 @@ struct CUSTOMVERTEX
 static ImGui_ImplDX9_Data* ImGui_ImplDX9_GetBackendData()
 {
     return ImGui::GetCurrentContext() ? (ImGui_ImplDX9_Data*)ImGui::GetIO().BackendRendererUserData : nullptr;
+}
+
+static volatile LONG g_ImGuiDx9LoggedFailures = 0;
+
+static void ImGui_ImplDX9_LogFailureOnce(LONG failureBit, const char* operation, HRESULT hr)
+{
+    const LONG previous = InterlockedOr(&g_ImGuiDx9LoggedFailures, failureBit);
+    if ((previous & failureBit) == 0)
+        Log("[!] ImGui DX9 backend failure: %s hr=0x%08X\n", operation, hr);
 }
 
 // Functions
@@ -166,9 +176,17 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
 {
     // Avoid rendering when minimized
     if (draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f)
+    {
+        ImGui_ImplDX9_LogFailureOnce(1 << 0, "invalid display size", E_INVALIDARG);
         return;
+    }
 
     ImGui_ImplDX9_Data* bd = ImGui_ImplDX9_GetBackendData();
+    if (!bd || !bd->pd3dDevice)
+    {
+        ImGui_ImplDX9_LogFailureOnce(1 << 1, "backend/device unavailable", E_POINTER);
+        return;
+    }
     LPDIRECT3DDEVICE9 device = bd->pd3dDevice;
 
     // Catch up with texture updates. Most of the times, the list will have 1 element with an OK status, aka nothing to do.
@@ -183,23 +201,37 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
     {
         if (bd->pVB) { bd->pVB->Release(); bd->pVB = nullptr; }
         bd->VertexBufferSize = draw_data->TotalVtxCount + 5000;
-        if (device->CreateVertexBuffer(bd->VertexBufferSize * sizeof(CUSTOMVERTEX), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, D3DFVF_CUSTOMVERTEX, D3DPOOL_DEFAULT, &bd->pVB, nullptr) < 0)
+        const HRESULT hr = device->CreateVertexBuffer(bd->VertexBufferSize * sizeof(CUSTOMVERTEX), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, D3DFVF_CUSTOMVERTEX, D3DPOOL_DEFAULT, &bd->pVB, nullptr);
+        if (FAILED(hr))
+        {
+            ImGui_ImplDX9_LogFailureOnce(1 << 2, "CreateVertexBuffer", hr);
             return;
+        }
     }
     if (!bd->pIB || bd->IndexBufferSize < draw_data->TotalIdxCount)
     {
         if (bd->pIB) { bd->pIB->Release(); bd->pIB = nullptr; }
         bd->IndexBufferSize = draw_data->TotalIdxCount + 10000;
-        if (device->CreateIndexBuffer(bd->IndexBufferSize * sizeof(ImDrawIdx), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, sizeof(ImDrawIdx) == 2 ? D3DFMT_INDEX16 : D3DFMT_INDEX32, D3DPOOL_DEFAULT, &bd->pIB, nullptr) < 0)
+        const HRESULT hr = device->CreateIndexBuffer(bd->IndexBufferSize * sizeof(ImDrawIdx), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, sizeof(ImDrawIdx) == 2 ? D3DFMT_INDEX16 : D3DFMT_INDEX32, D3DPOOL_DEFAULT, &bd->pIB, nullptr);
+        if (FAILED(hr))
+        {
+            ImGui_ImplDX9_LogFailureOnce(1 << 3, "CreateIndexBuffer", hr);
             return;
+        }
     }
 
     // Backup the DX9 state
     IDirect3DStateBlock9* state_block = nullptr;
-    if (device->CreateStateBlock(D3DSBT_ALL, &state_block) < 0)
-        return;
-    if (state_block->Capture() < 0)
+    HRESULT hr = device->CreateStateBlock(D3DSBT_ALL, &state_block);
+    if (FAILED(hr))
     {
+        ImGui_ImplDX9_LogFailureOnce(1 << 4, "CreateStateBlock", hr);
+        return;
+    }
+    hr = state_block->Capture();
+    if (FAILED(hr))
+    {
+        ImGui_ImplDX9_LogFailureOnce(1 << 5, "StateBlock Capture", hr);
         state_block->Release();
         return;
     }
@@ -213,13 +245,17 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
     // Allocate buffers
     CUSTOMVERTEX* vtx_dst;
     ImDrawIdx* idx_dst;
-    if (bd->pVB->Lock(0, (UINT)(draw_data->TotalVtxCount * sizeof(CUSTOMVERTEX)), (void**)&vtx_dst, D3DLOCK_DISCARD) < 0)
+    hr = bd->pVB->Lock(0, (UINT)(draw_data->TotalVtxCount * sizeof(CUSTOMVERTEX)), (void**)&vtx_dst, D3DLOCK_DISCARD);
+    if (FAILED(hr))
     {
+        ImGui_ImplDX9_LogFailureOnce(1 << 6, "VertexBuffer Lock", hr);
         state_block->Release();
         return;
     }
-    if (bd->pIB->Lock(0, (UINT)(draw_data->TotalIdxCount * sizeof(ImDrawIdx)), (void**)&idx_dst, D3DLOCK_DISCARD) < 0)
+    hr = bd->pIB->Lock(0, (UINT)(draw_data->TotalIdxCount * sizeof(ImDrawIdx)), (void**)&idx_dst, D3DLOCK_DISCARD);
+    if (FAILED(hr))
     {
+        ImGui_ImplDX9_LogFailureOnce(1 << 7, "IndexBuffer Lock", hr);
         bd->pVB->Unlock();
         state_block->Release();
         return;
@@ -289,7 +325,9 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
                 // Bind texture, Draw
                 const LPDIRECT3DTEXTURE9 texture = (LPDIRECT3DTEXTURE9)pcmd->GetTexID();
                 device->SetTexture(0, texture);
-                device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, pcmd->VtxOffset + global_vtx_offset, 0, (UINT)draw_list->VtxBuffer.Size, pcmd->IdxOffset + global_idx_offset, pcmd->ElemCount / 3);
+                hr = device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, pcmd->VtxOffset + global_vtx_offset, 0, (UINT)draw_list->VtxBuffer.Size, pcmd->IdxOffset + global_idx_offset, pcmd->ElemCount / 3);
+                if (FAILED(hr))
+                    ImGui_ImplDX9_LogFailureOnce(1 << 8, "DrawIndexedPrimitive", hr);
             }
         }
         global_idx_offset += draw_list->IdxBuffer.Size;
@@ -400,15 +438,21 @@ void ImGui_ImplDX9_UpdateTexture(ImTextureData* tex)
         HRESULT hr = bd->pd3dDevice->CreateTexture(tex->Width, tex->Height, 1, D3DUSAGE_DYNAMIC, bd->HasRgbaSupport ? D3DFMT_A8B8G8R8 : D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &dx_tex, nullptr);
         if (hr < 0)
         {
+            ImGui_ImplDX9_LogFailureOnce(1 << 9, "CreateTexture", hr);
             IM_ASSERT(hr >= 0 && "Backend failed to create texture!");
             return;
         }
 
         D3DLOCKED_RECT locked_rect;
-        if (dx_tex->LockRect(0, &locked_rect, nullptr, 0) == D3D_OK)
+        hr = dx_tex->LockRect(0, &locked_rect, nullptr, 0);
+        if (SUCCEEDED(hr))
         {
             ImGui_ImplDX9_CopyTextureRegion(tex->UseColors, (ImU32*)tex->GetPixels(), tex->Width * 4, (ImU32*)locked_rect.pBits, (ImU32)locked_rect.Pitch, tex->Width, tex->Height);
             dx_tex->UnlockRect(0);
+        }
+        else
+        {
+            ImGui_ImplDX9_LogFailureOnce(1 << 10, "Font texture LockRect", hr);
         }
 
         // Store identifiers

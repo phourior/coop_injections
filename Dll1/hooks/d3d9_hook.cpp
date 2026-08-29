@@ -11,29 +11,63 @@
 using SwapChainPresentFn = HRESULT(WINAPI*)(
     IDirect3DSwapChain9*, const RECT*, const RECT*, HWND, const RGNDATA*, DWORD);
 
+// IDirect3DDevice9::Present signature (vtable[17])
+using DevicePresentFn = HRESULT(WINAPI*)(
+    IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
+
+// IDirect3DDevice9Ex::PresentEx signature (vtable[121])
+using DevicePresentExFn = HRESULT(WINAPI*)(
+    IDirect3DDevice9Ex*, const RECT*, const RECT*, HWND, const RGNDATA*, DWORD);
+
+// IDirect3DDevice9::EndScene signature (vtable[42])
+using DeviceEndSceneFn = HRESULT(WINAPI*)(IDirect3DDevice9*);
+
 // IDirect3DDevice9::Reset signature (vtable[16])
 using DeviceResetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
 
 static SwapChainPresentFn g_origSwapChainPresent = nullptr;
+static DevicePresentFn    g_origDevicePresent = nullptr;
+static DevicePresentExFn  g_origDevicePresentEx = nullptr;
+static DeviceEndSceneFn   g_origDeviceEndScene = nullptr;
 static DeviceResetFn      g_origDeviceReset = nullptr;
+static volatile LONG      g_swapChainPresentCalls = 0;
+static volatile LONG      g_devicePresentCalls = 0;
+static volatile LONG      g_devicePresentExCalls = 0;
+static volatile LONG      g_deviceEndSceneCalls = 0;
+static volatile LONG      g_presentResultLogged = 0;
+static volatile LONG64    g_lastHookCounterLogTick = 0;
 
-// ─── Hooked SwapChain::Present ───
-
-static HRESULT WINAPI HookedSwapChainPresent(
-    IDirect3DSwapChain9* pSwapChain,
-    const RECT* pSourceRect,
-    const RECT* pDestRect,
-    HWND hDestWindowOverride,
-    const RGNDATA* pDirtyRegion,
-    DWORD dwFlags)
+static void LogHookCountersIfDue(const char* activePath)
 {
-    EnterHookCallback();
+    const LONG64 now = static_cast<LONG64>(GetTickCount64());
+    const LONG64 previous = InterlockedCompareExchange64(
+        &g_lastHookCounterLogTick, now, 0);
+    LONG64 last = previous;
+    if (previous != 0)
+    {
+        if (now - previous < 5000 ||
+            InterlockedCompareExchange64(&g_lastHookCounterLogTick, now, previous) != previous)
+            return;
+        last = previous;
+    }
 
+    Log("[*] D3D9 callback counters: active=%s swapChainPresent=%ld "
+        "devicePresent=%ld presentEx=%ld endScene=%ld interval=%lldms\n",
+        activePath,
+        InterlockedCompareExchange(&g_swapChainPresentCalls, 0, 0),
+        InterlockedCompareExchange(&g_devicePresentCalls, 0, 0),
+        InterlockedCompareExchange(&g_devicePresentExCalls, 0, 0),
+        InterlockedCompareExchange(&g_deviceEndSceneCalls, 0, 0),
+        previous ? now - last : 0);
+}
+
+static void RenderFromSwapChain(IDirect3DSwapChain9* swapChain)
+{
     if (!IsDllUnloading() && !IsOverlayReady())
     {
         __try
         {
-            InitializeOverlay(pSwapChain);
+            InitializeOverlay(swapChain);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -52,9 +86,149 @@ static HRESULT WINAPI HookedSwapChainPresent(
             Log("[!] RenderOverlayFrame CRASHED: 0x%08X\n", GetExceptionCode());
         }
     }
+}
+
+// ─── Hooked SwapChain::Present ───
+
+static HRESULT WINAPI HookedSwapChainPresent(
+    IDirect3DSwapChain9* pSwapChain,
+    const RECT* pSourceRect,
+    const RECT* pDestRect,
+    HWND hDestWindowOverride,
+    const RGNDATA* pDirtyRegion,
+    DWORD dwFlags)
+{
+    EnterHookCallback();
+
+    const LONG presentCall = InterlockedIncrement(&g_swapChainPresentCalls);
+    if (presentCall == 1)
+    {
+        Log("[+] First D3D9 SwapChain::Present callback: swapChain=%p "
+            "destWindow=%p flags=0x%08lX\n",
+            pSwapChain, hDestWindowOverride, dwFlags);
+    }
+
+    if (InterlockedCompareExchange(&g_deviceEndSceneCalls, 0, 0) == 0)
+        RenderFromSwapChain(pSwapChain);
+    LogHookCountersIfDue("SwapChain::Present");
 
     HRESULT result = g_origSwapChainPresent(
         pSwapChain, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
+    if (InterlockedCompareExchange(&g_presentResultLogged, 1, 0) == 0)
+        Log("[*] First original D3D9 SwapChain::Present result: 0x%08X\n", result);
+    else if (FAILED(result) && result != D3DERR_WASSTILLDRAWING)
+        Log("[!] D3D9 SwapChain::Present failed: 0x%08X\n", result);
+    LeaveHookCallback();
+    return result;
+}
+
+// ─── Hooked Device::Present ───
+
+static HRESULT WINAPI HookedDevicePresent(
+    IDirect3DDevice9* pDevice,
+    const RECT* pSourceRect,
+    const RECT* pDestRect,
+    HWND hDestWindowOverride,
+    const RGNDATA* pDirtyRegion)
+{
+    EnterHookCallback();
+
+    const LONG presentCall = InterlockedIncrement(&g_devicePresentCalls);
+    if (presentCall == 1)
+        Log("[+] First D3D9 Device::Present callback: device=%p destWindow=%p\n",
+            pDevice, hDestWindowOverride);
+
+    IDirect3DSwapChain9* swapChain = nullptr;
+    const HRESULT swapChainHr = pDevice->GetSwapChain(0, &swapChain);
+    if (SUCCEEDED(swapChainHr) && swapChain)
+    {
+        if (InterlockedCompareExchange(&g_deviceEndSceneCalls, 0, 0) == 0)
+            RenderFromSwapChain(swapChain);
+        swapChain->Release();
+    }
+    else if (presentCall == 1)
+    {
+        Log("[!] Device::Present GetSwapChain failed: 0x%08X\n", swapChainHr);
+    }
+    LogHookCountersIfDue("Device::Present");
+
+    const HRESULT result = g_origDevicePresent(
+        pDevice, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
+    if (FAILED(result) && result != D3DERR_WASSTILLDRAWING)
+        Log("[!] D3D9 Device::Present failed: 0x%08X\n", result);
+
+    LeaveHookCallback();
+    return result;
+}
+
+// ─── Hooked Device9Ex::PresentEx ───
+
+static HRESULT WINAPI HookedDevicePresentEx(
+    IDirect3DDevice9Ex* pDevice,
+    const RECT* pSourceRect,
+    const RECT* pDestRect,
+    HWND hDestWindowOverride,
+    const RGNDATA* pDirtyRegion,
+    DWORD dwFlags)
+{
+    EnterHookCallback();
+
+    const LONG presentCall = InterlockedIncrement(&g_devicePresentExCalls);
+    if (presentCall == 1)
+        Log("[+] First D3D9Ex Device::PresentEx callback: device=%p "
+            "destWindow=%p flags=0x%08lX\n",
+            pDevice, hDestWindowOverride, dwFlags);
+
+    IDirect3DSwapChain9* swapChain = nullptr;
+    const HRESULT swapChainHr = pDevice->GetSwapChain(0, &swapChain);
+    if (SUCCEEDED(swapChainHr) && swapChain)
+    {
+        if (InterlockedCompareExchange(&g_deviceEndSceneCalls, 0, 0) == 0)
+            RenderFromSwapChain(swapChain);
+        swapChain->Release();
+    }
+    else if (presentCall == 1)
+    {
+        Log("[!] Device::PresentEx GetSwapChain failed: 0x%08X\n", swapChainHr);
+    }
+    LogHookCountersIfDue("Device9Ex::PresentEx");
+
+    const HRESULT result = g_origDevicePresentEx(
+        pDevice, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
+    if (FAILED(result) && result != D3DERR_WASSTILLDRAWING)
+        Log("[!] D3D9Ex Device::PresentEx failed: 0x%08X\n", result);
+
+    LeaveHookCallback();
+    return result;
+}
+
+// ─── Hooked Device::EndScene ───
+
+static HRESULT WINAPI HookedDeviceEndScene(IDirect3DDevice9* pDevice)
+{
+    EnterHookCallback();
+
+    const LONG endSceneCall = InterlockedIncrement(&g_deviceEndSceneCalls);
+    if (endSceneCall == 1)
+        Log("[+] First D3D9 Device::EndScene callback: device=%p\n", pDevice);
+
+    IDirect3DSwapChain9* swapChain = nullptr;
+    const HRESULT swapChainHr = pDevice->GetSwapChain(0, &swapChain);
+    if (SUCCEEDED(swapChainHr) && swapChain)
+    {
+        RenderFromSwapChain(swapChain);
+        swapChain->Release();
+    }
+    else if (endSceneCall == 1)
+    {
+        Log("[!] Device::EndScene GetSwapChain failed: 0x%08X\n", swapChainHr);
+    }
+    LogHookCountersIfDue("Device::EndScene");
+
+    const HRESULT result = g_origDeviceEndScene(pDevice);
+    if (FAILED(result))
+        Log("[!] D3D9 Device::EndScene failed: 0x%08X\n", result);
+
     LeaveHookCallback();
     return result;
 }
@@ -74,7 +248,15 @@ static HRESULT WINAPI HookedDeviceReset(
     HRESULT hr = g_origDeviceReset(pDevice, pPresentationParameters);
 
     if (!IsDllUnloading() && SUCCEEDED(hr))
+    {
+        Log("[+] Device::Reset succeeded: windowed=%d backBuffer=%ux%u format=%u hwnd=%p\n",
+            pPresentationParameters ? pPresentationParameters->Windowed : 0,
+            pPresentationParameters ? pPresentationParameters->BackBufferWidth : 0,
+            pPresentationParameters ? pPresentationParameters->BackBufferHeight : 0,
+            pPresentationParameters ? pPresentationParameters->BackBufferFormat : 0,
+            pPresentationParameters ? pPresentationParameters->hDeviceWindow : nullptr);
         OnDeviceReset();
+    }
     else if (!IsDllUnloading())
         Log("[!] Device::Reset failed: 0x%08X\n", hr);
 
@@ -88,6 +270,9 @@ struct HookAddresses
 {
     uintptr_t swapChainPresent; // IDirect3DSwapChain9::Present  vtable[3]
     uintptr_t deviceReset;      // IDirect3DDevice9::Reset       vtable[16]
+    uintptr_t devicePresent;    // IDirect3DDevice9::Present     vtable[17]
+    uintptr_t devicePresentEx;  // IDirect3DDevice9Ex::PresentEx vtable[121]
+    uintptr_t deviceEndScene;   // IDirect3DDevice9::EndScene    vtable[42]
 };
 
 // 重复加载修复：缓存保存在 SC2 进程环境中，因此 DLL 卸载后仍然存在，
@@ -114,25 +299,36 @@ static bool IsExecutableAddress(uintptr_t address)
     // 运行时创建另一个 HAL 设备并持续收到 D3DERR_DEVICELOST。
 static HookAddresses LoadCachedD3D9Addresses()
 {
-    wchar_t value[64]{};
+    wchar_t value[128]{};
     if (!GetEnvironmentVariableW(kD3D9AddressCache, value, _countof(value)))
         return {};
 
     unsigned long long present = 0;
     unsigned long long reset = 0;
-    if (swscanf_s(value, L"%llx,%llx", &present, &reset) != 2)
+    unsigned long long devicePresent = 0;
+    unsigned long long devicePresentEx = 0;
+    unsigned long long deviceEndScene = 0;
+    if (swscanf_s(value, L"%llx,%llx,%llx,%llx,%llx",
+        &present, &reset, &devicePresent, &devicePresentEx, &deviceEndScene) != 5)
         return {};
 
     HookAddresses addresses{
         static_cast<uintptr_t>(present),
         static_cast<uintptr_t>(reset),
+        static_cast<uintptr_t>(devicePresent),
+        static_cast<uintptr_t>(devicePresentEx),
+        static_cast<uintptr_t>(deviceEndScene),
     };
     if (!IsExecutableAddress(addresses.swapChainPresent) ||
-        !IsExecutableAddress(addresses.deviceReset))
+        !IsExecutableAddress(addresses.deviceReset) ||
+        !IsExecutableAddress(addresses.devicePresent) ||
+        !IsExecutableAddress(addresses.deviceEndScene) ||
+        (addresses.devicePresentEx && !IsExecutableAddress(addresses.devicePresentEx)))
         return {};
 
-    Log("[+] Reusing cached D3D9 hooks: Present=0x%llX Reset=0x%llX\n",
-        present, reset);
+    Log("[+] Reusing cached D3D9 hooks: SwapChainPresent=0x%llX "
+        "Reset=0x%llX DevicePresent=0x%llX PresentEx=0x%llX EndScene=0x%llX\n",
+        present, reset, devicePresent, devicePresentEx, deviceEndScene);
     return addresses;
 }
 
@@ -140,10 +336,13 @@ static HookAddresses LoadCachedD3D9Addresses()
 // 静态存储，所以 FreeLibrary 后仍可供下一次注入读取。
 static void CacheD3D9Addresses(const HookAddresses& addresses)
 {
-    wchar_t value[64]{};
-    swprintf_s(value, L"%llX,%llX",
+    wchar_t value[128]{};
+    swprintf_s(value, L"%llX,%llX,%llX,%llX,%llX",
         static_cast<unsigned long long>(addresses.swapChainPresent),
-        static_cast<unsigned long long>(addresses.deviceReset));
+        static_cast<unsigned long long>(addresses.deviceReset),
+        static_cast<unsigned long long>(addresses.devicePresent),
+        static_cast<unsigned long long>(addresses.devicePresentEx),
+        static_cast<unsigned long long>(addresses.deviceEndScene));
     if (!SetEnvironmentVariableW(kD3D9AddressCache, value))
         Log("[!] Failed to cache D3D9 hook addresses: %u\n", GetLastError());
 }
@@ -240,6 +439,36 @@ static HookAddresses GetD3D9Addresses()
     HookAddresses addrs{};
     addrs.swapChainPresent = reinterpret_cast<uintptr_t>(scVtbl[3]);
     addrs.deviceReset      = reinterpret_cast<uintptr_t>(devVtbl[16]);
+    addrs.devicePresent    = reinterpret_cast<uintptr_t>(devVtbl[17]);
+    addrs.deviceEndScene   = reinterpret_cast<uintptr_t>(devVtbl[42]);
+
+    IDirect3D9Ex* d3d9Ex = nullptr;
+    IDirect3DDevice9Ex* deviceEx = nullptr;
+    const HRESULT create9ExHr = Direct3DCreate9Ex(D3D_SDK_VERSION, &d3d9Ex);
+    if (SUCCEEDED(create9ExHr) && d3d9Ex)
+    {
+        D3DPRESENT_PARAMETERS ppEx = pp;
+        const HRESULT createDeviceExHr = d3d9Ex->CreateDeviceEx(
+            D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
+            D3DCREATE_SOFTWARE_VERTEXPROCESSING, &ppEx, nullptr, &deviceEx);
+        if (SUCCEEDED(createDeviceExHr) && deviceEx)
+        {
+            void** devExVtbl = *reinterpret_cast<void***>(deviceEx);
+            addrs.devicePresentEx = reinterpret_cast<uintptr_t>(devExVtbl[121]);
+            Log("[+] IDirect3DDevice9Ex::PresentEx = 0x%llX\n",
+                static_cast<unsigned long long>(addrs.devicePresentEx));
+        }
+        else
+        {
+            Log("[!] CreateDeviceEx(HAL) failed: 0x%08X; PresentEx hook unavailable\n",
+                createDeviceExHr);
+        }
+    }
+    else
+    {
+        Log("[!] Direct3DCreate9Ex failed: 0x%08X; PresentEx hook unavailable\n",
+            create9ExHr);
+    }
     // 必须在释放临时设备前保存函数入口，使同一 SC2 进程后续重载不再依赖
     // 临时设备能否创建成功。
     CacheD3D9Addresses(addrs);
@@ -248,8 +477,14 @@ static HookAddresses GetD3D9Addresses()
         static_cast<unsigned long long>(addrs.swapChainPresent));
     Log("[+] IDirect3DDevice9::Reset = 0x%llX\n",
         static_cast<unsigned long long>(addrs.deviceReset));
+    Log("[+] IDirect3DDevice9::Present = 0x%llX\n",
+        static_cast<unsigned long long>(addrs.devicePresent));
+    Log("[+] IDirect3DDevice9::EndScene = 0x%llX\n",
+        static_cast<unsigned long long>(addrs.deviceEndScene));
 
     swapChain->Release();
+    if (deviceEx) deviceEx->Release();
+    if (d3d9Ex) d3d9Ex->Release();
     device->Release();
     d3d9->Release();
     DestroyWindow(hwnd);
@@ -259,6 +494,14 @@ static HookAddresses GetD3D9Addresses()
 }
 
 // ─── Public API ───
+
+bool HasD3D9PresentHookFired()
+{
+    return InterlockedCompareExchange(&g_swapChainPresentCalls, 0, 0) != 0 ||
+        InterlockedCompareExchange(&g_devicePresentCalls, 0, 0) != 0 ||
+        InterlockedCompareExchange(&g_devicePresentExCalls, 0, 0) != 0 ||
+        InterlockedCompareExchange(&g_deviceEndSceneCalls, 0, 0) != 0;
+}
 
 bool SetupHooks()
 {
@@ -274,7 +517,8 @@ bool SetupHooks()
     }
 
     HookAddresses addrs = GetD3D9Addresses();
-    if (!addrs.swapChainPresent || !addrs.deviceReset)
+    if (!addrs.swapChainPresent || !addrs.deviceReset ||
+        !addrs.devicePresent || !addrs.deviceEndScene)
     {
         Log("[!] Failed to get D3D9 vtable addresses\n");
         MH_Uninitialize();
@@ -289,6 +533,44 @@ bool SetupHooks()
     if (st != MH_OK)
     {
         Log("[!] MH_CreateHook Present failed: %s\n", MH_StatusToString(st));
+        MH_Uninitialize();
+        return false;
+    }
+
+    if (addrs.devicePresentEx)
+    {
+        st = MH_CreateHook(
+            reinterpret_cast<LPVOID>(addrs.devicePresentEx),
+            &HookedDevicePresentEx,
+            reinterpret_cast<LPVOID*>(&g_origDevicePresentEx));
+        if (st != MH_OK)
+        {
+            Log("[!] MH_CreateHook PresentEx failed: %s\n", MH_StatusToString(st));
+            MH_Uninitialize();
+            return false;
+        }
+    }
+
+    st = MH_CreateHook(
+        reinterpret_cast<LPVOID>(addrs.deviceEndScene),
+        &HookedDeviceEndScene,
+        reinterpret_cast<LPVOID*>(&g_origDeviceEndScene));
+    if (st != MH_OK)
+    {
+        Log("[!] MH_CreateHook EndScene failed: %s\n", MH_StatusToString(st));
+        MH_Uninitialize();
+        return false;
+    }
+
+    // Some D3D9 clients render continuously through IDirect3DDevice9::Present
+    // and call IDirect3DSwapChain9::Present only during transitions.
+    st = MH_CreateHook(
+        reinterpret_cast<LPVOID>(addrs.devicePresent),
+        &HookedDevicePresent,
+        reinterpret_cast<LPVOID*>(&g_origDevicePresent));
+    if (st != MH_OK)
+    {
+        Log("[!] MH_CreateHook Device Present failed: %s\n", MH_StatusToString(st));
         MH_Uninitialize();
         return false;
     }
@@ -329,8 +611,12 @@ bool SetupHooks()
     // 用户在菜单勾选 "NNet 包捕获" 时再通过 EnableNNetCapture(true) 启用
     DisableNNetHooksAtStartup();
 
-    Log("[+] D3D9 hooks installed: Present=0x%llX Reset=0x%llX\n",
+    Log("[+] D3D9 hooks installed: SwapChainPresent=0x%llX "
+        "DevicePresent=0x%llX PresentEx=0x%llX EndScene=0x%llX Reset=0x%llX\n",
         static_cast<unsigned long long>(addrs.swapChainPresent),
+        static_cast<unsigned long long>(addrs.devicePresent),
+        static_cast<unsigned long long>(addrs.devicePresentEx),
+        static_cast<unsigned long long>(addrs.deviceEndScene),
         static_cast<unsigned long long>(addrs.deviceReset));
     return true;
 }

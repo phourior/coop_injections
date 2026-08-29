@@ -6,6 +6,7 @@
 #include "hooks/game_hook.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_dx9.h>
 #include <imgui_impl_win32.h>
 
@@ -190,6 +191,7 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
     Log("[*] InitOverlay step 3: FindWindow\n");
 
     HWND hwnd = pp.hDeviceWindow;
+    const bool usedPresentWindow = hwnd && IsWindow(hwnd) && IsWindowVisible(hwnd);
     if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd))
         hwnd = FindMainWindowForCurrentProcess();
 
@@ -218,6 +220,48 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
         return false;
     }
 
+    char windowClass[128]{};
+    wchar_t windowTitle[256]{};
+    GetClassNameA(hwnd, windowClass, static_cast<int>(_countof(windowClass)));
+    GetWindowTextW(hwnd, windowTitle, static_cast<int>(_countof(windowTitle)));
+    Log("[*] SwapChain parameters: windowed=%d backBuffer=%ux%u format=%u "
+        "swapEffect=%u deviceWindow=%p selectedWindow=%p source=%s\n",
+        pp.Windowed, pp.BackBufferWidth, pp.BackBufferHeight, pp.BackBufferFormat,
+        pp.SwapEffect, pp.hDeviceWindow, hwnd,
+        usedPresentWindow ? "present-parameters" : "process-window-fallback");
+    Log("[*] Selected window: class='%s' title='%ls' client=%ldx%ld visible=%d\n",
+        windowClass, windowTitle, w, h, IsWindowVisible(hwnd));
+
+    D3DDEVICE_CREATION_PARAMETERS creation{};
+    D3DCAPS9 caps{};
+    IDirect3D9* direct3D = nullptr;
+    D3DADAPTER_IDENTIFIER9 adapter{};
+    const HRESULT creationHr = device->GetCreationParameters(&creation);
+    const HRESULT capsHr = device->GetDeviceCaps(&caps);
+    const HRESULT direct3DHr = device->GetDirect3D(&direct3D);
+    HRESULT adapterHr = E_FAIL;
+    if (SUCCEEDED(direct3DHr) && direct3D)
+        adapterHr = direct3D->GetAdapterIdentifier(creation.AdapterOrdinal, 0, &adapter);
+    Log("[*] D3D9 device: creationHr=0x%08X adapter=%u type=%u behavior=0x%08lX "
+        "focusWindow=%p capsHr=0x%08X devCaps=0x%08lX presentationIntervals=0x%08lX\n",
+        creationHr, creation.AdapterOrdinal, creation.DeviceType, creation.BehaviorFlags,
+        creation.hFocusWindow, capsHr, caps.DevCaps, caps.PresentationIntervals);
+    Log("[*] D3D9 adapter: queryHr=0x%08X description='%s' device='%s' "
+        "vendor=0x%04lX deviceId=0x%04lX subsystem=0x%08lX revision=%lu driver='%s'\n",
+        adapterHr, adapter.Description, adapter.DeviceName, adapter.VendorId,
+        adapter.DeviceId, adapter.SubSysId, adapter.Revision, adapter.Driver);
+    if (direct3D)
+        direct3D->Release();
+
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    const UINT dpi = GetDpiForWindow(hwnd);
+    Log("[*] Window environment: style=0x%llX exStyle=0x%llX dpi=%u "
+        "thread=%lu process=%lu desktop=%p cloakedCheck=%d\n",
+        static_cast<unsigned long long>(style), static_cast<unsigned long long>(exStyle),
+        dpi, GetWindowThreadProcessId(hwnd, nullptr), GetCurrentProcessId(),
+        GetThreadDesktop(GetCurrentThreadId()), IsWindowEnabled(hwnd));
+
     Log("[*] InitOverlay step 4: Subclass window hwnd=%p %ldx%ld\n", hwnd, w, h);
 
     g_screenWidth  = static_cast<float>(w);
@@ -245,6 +289,7 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
     // 鼠标指针修复：禁止 ImGui 根据悬停控件修改 Win32 系统指针样式，
     // 避免它与游戏自身的指针更新互相覆盖而造成指针反复横跳。
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard
@@ -294,7 +339,12 @@ bool InitializeOverlay(IDirect3DSwapChain9* pSwapChain)
 
     g_imguiInitialized = true;
     s_initInProgress = false;
-    Log("[+] Overlay init OK. hwnd=%p %ldx%ld\n", g_hWnd, w, h);
+    Log("[+] Overlay init OK. hwnd=%p %ldx%ld imgui=%s backendPlatform='%s' "
+        "backendRenderer='%s' fontCount=%d ini=%s\n",
+        g_hWnd, w, h, ImGui::GetVersion(),
+        io.BackendPlatformName ? io.BackendPlatformName : "null",
+        io.BackendRendererName ? io.BackendRendererName : "null",
+        io.Fonts->Fonts.Size, io.IniFilename ? io.IniFilename : "disabled");
     return true;
 }
 
@@ -324,6 +374,9 @@ void ShutdownOverlay()
 
 void RenderOverlayFrame()
 {
+    static unsigned long long frameCount = 0;
+    static ULONGLONG lastDiagnosticAt = 0;
+
     ImGui_ImplDX9_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -343,6 +396,68 @@ void RenderOverlayFrame()
 
     ImGui::EndFrame();
     ImGui::Render();
+
+    ++frameCount;
+    const ULONGLONG now = GetTickCount64();
+    const bool logDiagnostic = frameCount == 1 || now - lastDiagnosticAt >= 5000;
+    if (logDiagnostic)
+    {
+        ImDrawData* drawData = ImGui::GetDrawData();
+        IDirect3DSurface9* renderTarget = nullptr;
+        D3DSURFACE_DESC renderTargetDesc{};
+        const HRESULT renderTargetHr = g_device->GetRenderTarget(0, &renderTarget);
+        if (SUCCEEDED(renderTargetHr) && renderTarget)
+        {
+            renderTarget->GetDesc(&renderTargetDesc);
+            renderTarget->Release();
+        }
+
+        const HRESULT cooperativeHr = g_device->TestCooperativeLevel();
+        D3DVIEWPORT9 viewport{};
+        const HRESULT viewportHr = g_device->GetViewport(&viewport);
+        const ImGuiIO& io = ImGui::GetIO();
+        const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+        const ImGuiWindow* currentWindow = ImGui::FindWindowByName("合作外挂");
+        const ImGuiWindow* debugWindow = ImGui::FindWindowByName("##DebugOverlay");
+        Log("[*] Overlay frame %llu: menu=%d display=%.0fx%.0f lists=%d "
+            "vertices=%d indices=%d rtHr=0x%08X rt=%ux%u format=%u "
+            "cooperative=0x%08X viewportHr=0x%08X viewport=%lu,%lu %lux%lu "
+            "delta=%.4f frameRate=%.1f mouse=%.0f,%.0f hwnd=%p foreground=%p\n",
+            frameCount, g_showMenu,
+            drawData ? drawData->DisplaySize.x : 0.0f,
+            drawData ? drawData->DisplaySize.y : 0.0f,
+            drawData ? drawData->CmdListsCount : 0,
+            drawData ? drawData->TotalVtxCount : 0,
+            drawData ? drawData->TotalIdxCount : 0,
+            renderTargetHr, renderTargetDesc.Width, renderTargetDesc.Height,
+            renderTargetDesc.Format, cooperativeHr, viewportHr,
+            viewport.X, viewport.Y, viewport.Width, viewport.Height,
+            io.DeltaTime, io.Framerate, io.MousePos.x, io.MousePos.y,
+            g_hWnd, GetForegroundWindow());
+        Log("[*] ImGui state frame %llu: frame=%d activeWindows=%d mainViewport="
+            "pos=%.0f,%.0f size=%.0fx%.0f menuWindow=%p pos=%.0f,%.0f "
+            "size=%.0fx%.0f hidden=%d collapsed=%d debugWindow=%p "
+            "pos=%.0f,%.0f size=%.0fx%.0f hidden=%d fontTex=%llu textures=%d\n",
+            frameCount, ImGui::GetFrameCount(), ImGui::GetCurrentContext()->WindowsActiveCount,
+            mainViewport->Pos.x, mainViewport->Pos.y,
+            mainViewport->Size.x, mainViewport->Size.y,
+            currentWindow,
+            currentWindow ? currentWindow->Pos.x : 0.0f,
+            currentWindow ? currentWindow->Pos.y : 0.0f,
+            currentWindow ? currentWindow->Size.x : 0.0f,
+            currentWindow ? currentWindow->Size.y : 0.0f,
+            currentWindow ? currentWindow->Hidden : -1,
+            currentWindow ? currentWindow->Collapsed : -1,
+            debugWindow,
+            debugWindow ? debugWindow->Pos.x : 0.0f,
+            debugWindow ? debugWindow->Pos.y : 0.0f,
+            debugWindow ? debugWindow->Size.x : 0.0f,
+            debugWindow ? debugWindow->Size.y : 0.0f,
+            debugWindow ? debugWindow->Hidden : -1,
+            static_cast<unsigned long long>(io.Fonts->TexRef.GetTexID()),
+            ImGui::GetPlatformIO().Textures.Size);
+        lastDiagnosticAt = now;
+    }
 
     // 审查修复 #6：DX9 后端内部已保存并恢复完整设备状态，不再在外层
     // 创建第二个 D3DSBT_ALL StateBlock。
