@@ -35,31 +35,6 @@ static volatile LONG      g_devicePresentCalls = 0;
 static volatile LONG      g_devicePresentExCalls = 0;
 static volatile LONG      g_deviceEndSceneCalls = 0;
 static volatile LONG      g_presentResultLogged = 0;
-static volatile LONG64    g_lastHookCounterLogTick = 0;
-
-static void LogHookCountersIfDue(const char* activePath)
-{
-    const LONG64 now = static_cast<LONG64>(GetTickCount64());
-    const LONG64 previous = InterlockedCompareExchange64(
-        &g_lastHookCounterLogTick, now, 0);
-    LONG64 last = previous;
-    if (previous != 0)
-    {
-        if (now - previous < 5000 ||
-            InterlockedCompareExchange64(&g_lastHookCounterLogTick, now, previous) != previous)
-            return;
-        last = previous;
-    }
-
-    Log("[*] D3D9 callback counters: active=%s swapChainPresent=%ld "
-        "devicePresent=%ld presentEx=%ld endScene=%ld interval=%lldms\n",
-        activePath,
-        InterlockedCompareExchange(&g_swapChainPresentCalls, 0, 0),
-        InterlockedCompareExchange(&g_devicePresentCalls, 0, 0),
-        InterlockedCompareExchange(&g_devicePresentExCalls, 0, 0),
-        InterlockedCompareExchange(&g_deviceEndSceneCalls, 0, 0),
-        previous ? now - last : 0);
-}
 
 static void RenderFromSwapChain(IDirect3DSwapChain9* swapChain)
 {
@@ -110,7 +85,6 @@ static HRESULT WINAPI HookedSwapChainPresent(
 
     if (InterlockedCompareExchange(&g_deviceEndSceneCalls, 0, 0) == 0)
         RenderFromSwapChain(pSwapChain);
-    LogHookCountersIfDue("SwapChain::Present");
 
     HRESULT result = g_origSwapChainPresent(
         pSwapChain, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
@@ -150,7 +124,6 @@ static HRESULT WINAPI HookedDevicePresent(
     {
         Log("[!] Device::Present GetSwapChain failed: 0x%08X\n", swapChainHr);
     }
-    LogHookCountersIfDue("Device::Present");
 
     const HRESULT result = g_origDevicePresent(
         pDevice, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
@@ -191,7 +164,6 @@ static HRESULT WINAPI HookedDevicePresentEx(
     {
         Log("[!] Device::PresentEx GetSwapChain failed: 0x%08X\n", swapChainHr);
     }
-    LogHookCountersIfDue("Device9Ex::PresentEx");
 
     const HRESULT result = g_origDevicePresentEx(
         pDevice, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
@@ -223,7 +195,6 @@ static HRESULT WINAPI HookedDeviceEndScene(IDirect3DDevice9* pDevice)
     {
         Log("[!] Device::EndScene GetSwapChain failed: 0x%08X\n", swapChainHr);
     }
-    LogHookCountersIfDue("Device::EndScene");
 
     const HRESULT result = g_origDeviceEndScene(pDevice);
     if (FAILED(result))

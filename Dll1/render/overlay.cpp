@@ -397,11 +397,11 @@ void RenderOverlayFrame()
     ImGui::Render();
 
     ++frameCount;
-    const ULONGLONG now = GetTickCount64();
-    const bool logDiagnostic = frameCount == 1 || now - lastDiagnosticAt >= 5000;
+    ImDrawData* drawData = ImGui::GetDrawData();
+    const bool hasDrawData = drawData && drawData->TotalVtxCount > 0;
+    const bool logDiagnostic = frameCount == 1 || (hasDrawData && lastDiagnosticAt == 0);
     if (logDiagnostic)
     {
-        ImDrawData* drawData = ImGui::GetDrawData();
         IDirect3DSurface9* renderTarget = nullptr;
         D3DSURFACE_DESC renderTargetDesc{};
         const HRESULT renderTargetHr = g_device->GetRenderTarget(0, &renderTarget);
@@ -455,7 +455,8 @@ void RenderOverlayFrame()
             debugWindow ? debugWindow->Hidden : -1,
             static_cast<unsigned long long>(io.Fonts->TexRef.GetTexID()),
             ImGui::GetPlatformIO().Textures.Size);
-        lastDiagnosticAt = now;
+        if (hasDrawData)
+            lastDiagnosticAt = GetTickCount64();
     }
 
     // 审查修复 #6：DX9 后端内部已保存并恢复完整设备状态，不再在外层
