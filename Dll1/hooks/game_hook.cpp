@@ -570,6 +570,7 @@ static bool      g_fullMapVisionPatched = false;
 static volatile LONG g_fullMapVisionRequested = 0;
 static volatile LONG g_fullMapVisionMapIndex = -1;
 static SRWLOCK   g_fullMapVisionLock = SRWLOCK_INIT;
+static constexpr bool FULL_MAP_VISION_MAP_LIMIT_ENABLED = true; //地图限制开关，false为不限地图
 
 // 与逆向目标 DLL 一致，只在这些合作任务地图中自动应用 Fog 补丁。SC2 的两段
 // 标识可能分别保存内部路径和本地化显示名，所以同时保留中文名、英文名及
@@ -802,7 +803,10 @@ static void UpdateFullMapVisionMapState(const char* mapPath, const char* mapDesc
     {
         if (previousMap >= 0)
             Log("[*] FullMapVision map left: %s\n", FULL_MAP_VISION_MAPS[previousMap]);
-        RestoreFullMapVisionPatch();
+        if (FULL_MAP_VISION_MAP_LIMIT_ENABLED)
+            RestoreFullMapVisionPatch();
+        else if (InterlockedCompareExchange(&g_fullMapVisionRequested, 0, 0) != 0)
+            ApplyFullMapVisionPatch();
     }
     ReleaseSRWLockExclusive(&g_fullMapVisionLock);
 }
@@ -813,10 +817,12 @@ bool EnableFullMapVision()
 
     AcquireSRWLockExclusive(&g_fullMapVisionLock);
     const LONG mapIndex = InterlockedCompareExchange(&g_fullMapVisionMapIndex, 0, 0);
-    const bool result = mapIndex < 0 || ApplyFullMapVisionPatch();
+    const bool result = (!FULL_MAP_VISION_MAP_LIMIT_ENABLED || mapIndex >= 0)
+        ? ApplyFullMapVisionPatch()
+        : true;
     ReleaseSRWLockExclusive(&g_fullMapVisionLock);
 
-    if (mapIndex < 0)
+    if (FULL_MAP_VISION_MAP_LIMIT_ENABLED && mapIndex < 0)
         Log("[*] FullMapVision armed; waiting for a supported co-op map\n");
     return result;
 }
