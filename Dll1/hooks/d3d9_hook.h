@@ -8,4 +8,4 @@ bool SetupHooks();
 bool HasD3D9PresentHookFired();
 
 // Disable all hooks, shut down overlay, uninitialize MinHook.
-void CleanupHooks();
+bool CleanupHooks();

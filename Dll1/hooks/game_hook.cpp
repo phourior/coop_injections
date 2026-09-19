@@ -561,6 +561,17 @@ static constexpr uint8_t FULL_MAP_VISION_PATCH[10] = {
     0x90, 0x90, 0x90, 0x90, 0x90,
 };
 
+static constexpr uint8_t EnhancedVisionResult(uint8_t original, uint64_t flags)
+{
+    return original >= 8 ? original :
+        static_cast<uint8_t>(8 + (((flags >> 30) & 1) && !((flags >> 29) & 1)));
+}
+
+static_assert(EnhancedVisionResult(0, 0) == 8);
+static_assert(EnhancedVisionResult(7, uint64_t{1} << 30) == 9);
+static_assert(EnhancedVisionResult(0, uint64_t{3} << 29) == 8);
+static_assert(EnhancedVisionResult(12, uint64_t{1} << 30) == 12);
+
 // 原字节只在首次启用时保存。后续关闭必须恢复同一进程、同一版本的字节，
 // 不能把 Base97579 的原字节硬编码进 DLL。
 static uintptr_t g_fullMapVisionAddr = 0;
@@ -570,7 +581,158 @@ static bool      g_fullMapVisionPatched = false;
 static volatile LONG g_fullMapVisionRequested = 0;
 static volatile LONG g_fullMapVisionMapIndex = -1;
 static SRWLOCK   g_fullMapVisionLock = SRWLOCK_INIT;
-static constexpr bool FULL_MAP_VISION_MAP_LIMIT_ENABLED = true; //地图限制开关，false为不限地图
+static constexpr bool FULL_MAP_VISION_MAP_LIMIT_ENABLED = false; //地图限制开关，false为不限地图
+using UnitVisibilityFn = uint8_t(__fastcall*)(uintptr_t, uint8_t, uint8_t);
+static UnitVisibilityFn g_origUnitVisibility = nullptr;
+static uintptr_t g_enhancedVisionEntry = 0;
+static uintptr_t g_enhancedVisionAux = 0;
+static uintptr_t g_enhancedVisionPlayer = 0;
+static bool g_enhancedVisionSelected = false;
+static bool g_enhancedVisionHookEnabled = false;
+static bool g_enhancedVisionAuxPatched = false;
+static bool g_fullMapVisionFailed = false;
+static volatile LONG g_enhancedVisionActive = 0;
+static volatile LONG g_visionCalls = 0;
+static volatile LONG g_visionEligible = 0;
+static volatile LONG g_visionSpecial = 0;
+static volatile LONG g_visionChanged = 0;
+static volatile LONG g_visionPlayers = 0;
+static volatile LONG g_visionOriginalResults = 0;
+static volatile LONG g_visionLastLocalPlayer = -1;
+static volatile LONG g_visionLastExcluded = -1;
+static uintptr_t g_enhancedVisionFogState = 0;
+static uint32_t g_enhancedVisionFogMask = 0;
+static uint8_t g_enhancedVisionFogAlpha = 0;
+static uint8_t g_enhancedVisionFogPlayer = 0;
+static constexpr uint8_t ENHANCED_VISION_AUX_ORIGINAL[] = {0x8B, 0x4B, 0xFC};
+static constexpr uint8_t ENHANCED_VISION_AUX_PATCH[] = {0xEB, 0x06, 0x90};
+static constexpr uint8_t ENHANCED_VISION_MASK_ORIGINAL[] = {
+    0x48, 0x8D, 0x0D, 0x90, 0x0E, 0x37, 0x02, 0x8B, 0x34, 0x81,
+};
+static constexpr uint8_t VISION_ENTRY_ORIGINAL[] = {
+    0x44, 0x88, 0x44, 0x24, 0x18, 0x88, 0x54, 0x24, 0x10,
+    0x48, 0x89, 0x4C, 0x24, 0x08, 0x53, 0x56,
+};
+
+static bool VisionBytesEqual(uintptr_t address, const uint8_t* expected, size_t size)
+{
+    uint8_t current[32] = {};
+    return address && size <= sizeof(current) &&
+        SafeMemcpy(current, reinterpret_cast<const void*>(address), size) &&
+        memcmp(current, expected, size) == 0;
+}
+
+static bool IsEnhancedVisionArtifact(uint64_t token)
+{
+    const uintptr_t definition = static_cast<uintptr_t>((token & 0x00FFFFFFFFFFFFFFULL) << 5);
+    if (!definition)
+        return false;
+    const uintptr_t nameObject = ReadMemory<uintptr_t>(definition + 0xC8);
+    const uintptr_t name = nameObject ? ReadMemory<uintptr_t>(nameObject + 8) : 0;
+    if (!name)
+        return false;
+    static constexpr const char* names[] = {
+        "ZeratulArtifactPickup1", "ZeratulArtifactPickup2",
+        "ZeratulArtifactPickup3", "ZeratulArtifactPickupUnlimited",
+    };
+    for (const char* expected : names)
+    {
+        char actual[40] = {};
+        const size_t length = strlen(expected) + 1;
+        if (SafeMemcpy(actual, reinterpret_cast<const void*>(name), length) &&
+            memcmp(actual, expected, length) == 0)
+            return true;
+    }
+    return false;
+}
+
+static uint8_t __fastcall HookUnitVisibility(uintptr_t object, uint8_t player, uint8_t flags)
+{
+    EnterHookCallback();
+    uint8_t localPlayer = 0xFF;
+    uintptr_t unit = 0;
+    int8_t excluded = 0;
+    uint8_t special = 0;
+    uint64_t state = 0;
+    uint64_t token = 0;
+    InterlockedIncrement(&g_visionCalls);
+    if (player < 32)
+        InterlockedOr(&g_visionPlayers, static_cast<LONG>(uint32_t{1} << player));
+    const bool enhance = !IsDllUnloading() &&
+        InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0 &&
+        SafeMemcpy(&localPlayer, reinterpret_cast<const void*>(g_enhancedVisionPlayer), 1) &&
+        player == localPlayer && object &&
+        SafeMemcpy(&unit, reinterpret_cast<const void*>(object + 0x7A0), sizeof(unit)) && unit &&
+        SafeMemcpy(&excluded, reinterpret_cast<const void*>(unit + 0x41), 1) && excluded <= 0 &&
+        SafeMemcpy(&special, reinterpret_cast<const void*>(unit + 0x118), 1) &&
+        SafeMemcpy(&state, reinterpret_cast<const void*>(unit + 0x24), sizeof(state)) &&
+        SafeMemcpy(&token, reinterpret_cast<const void*>(unit + 8), sizeof(token));
+    InterlockedExchange(&g_visionLastLocalPlayer, localPlayer);
+    InterlockedExchange(&g_visionLastExcluded, excluded);
+    if (enhance)
+        InterlockedIncrement(&g_visionEligible);
+    uint8_t result;
+    if (enhance && (special & 0x40))
+    {
+        InterlockedIncrement(&g_visionSpecial);
+        result = IsEnhancedVisionArtifact(token) ? 12 : 1;
+    }
+    else
+    {
+        result = g_origUnitVisibility(object, player, flags);
+        if (enhance)
+        {
+            if (result < 32)
+                InterlockedOr(&g_visionOriginalResults, static_cast<LONG>(uint32_t{1} << result));
+            if (result < 8)
+                InterlockedIncrement(&g_visionChanged);
+            result = EnhancedVisionResult(result, state);
+        }
+    }
+    LeaveHookCallback();
+    return result;
+}
+
+static bool ResolveEnhancedVision()
+{
+    if (g_origUnitVisibility)
+        return true;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    if (!base)
+        return false;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+        nt->FileHeader.TimeDateStamp != 0x6A57F729 || nt->OptionalHeader.SizeOfImage != 0x8204000)
+    {
+        Log("[!] EnhancedVision: unsupported executable fingerprint\n");
+        return false;
+    }
+    const uintptr_t entry = base + 0x1CD7A30;
+    const uintptr_t auxiliary = base + 0x235E193;
+    static constexpr uint8_t auxiliaryContext[] = {
+        0x8B, 0x4B, 0xFC, 0xE8, 0xA5, 0x00, 0x0D, 0x00, 0xBE, 0x02, 0x00, 0x00, 0x00,
+    };
+    if (!VisionBytesEqual(entry, VISION_ENTRY_ORIGINAL, sizeof(VISION_ENTRY_ORIGINAL)) ||
+        !VisionBytesEqual(auxiliary, auxiliaryContext, sizeof(auxiliaryContext)) ||
+        !VisionBytesEqual(base + 0x1CD7A79, ENHANCED_VISION_MASK_ORIGINAL, sizeof(ENHANCED_VISION_MASK_ORIGINAL)))
+    {
+        Log("[!] EnhancedVision: code mismatch or another trainer owns the patch\n");
+        return false;
+    }
+    const MH_STATUS status = MH_CreateHook(reinterpret_cast<void*>(entry),
+        reinterpret_cast<void*>(&HookUnitVisibility), reinterpret_cast<void**>(&g_origUnitVisibility));
+    if (status != MH_OK)
+    {
+        Log("[!] EnhancedVision: create hook failed: %s\n", MH_StatusToString(status));
+        return false;
+    }
+    g_enhancedVisionEntry = entry;
+    g_enhancedVisionAux = auxiliary;
+    g_enhancedVisionPlayer = base + 0x3BB8BD0;
+    return true;
+}
 
 // 与逆向目标 DLL 一致，只在这些合作任务地图中自动应用 Fog 补丁。SC2 的两段
 // 标识可能分别保存内部路径和本地化显示名，所以同时保留中文名、英文名及
@@ -720,7 +882,7 @@ static bool WriteCodeBytes(uintptr_t address, const void* bytes, size_t size)
     return true;
 }
 
-static bool ApplyFullMapVisionPatch()
+static bool ApplyLegacyFullMapVisionPatch()
 {
     if (g_fullMapVisionPatched)
         return true;
@@ -739,6 +901,13 @@ static bool ApplyFullMapVisionPatch()
             static_cast<unsigned long long>(g_fullMapVisionAddr));
     }
 
+    if (!VisionBytesEqual(g_fullMapVisionAddr - 0x49, VISION_ENTRY_ORIGINAL,
+                          sizeof(VISION_ENTRY_ORIGINAL)))
+    {
+        Log("[!] FullMapVision: visibility entry is owned by another hook\n");
+        return false;
+    }
+
     if (!g_fullMapVisionOrigSaved)
     {
         if (!SafeMemcpy(g_fullMapVisionOrigBytes,
@@ -750,6 +919,10 @@ static bool ApplyFullMapVisionPatch()
         }
         g_fullMapVisionOrigSaved = true;
     }
+
+    if (!VisionBytesEqual(g_fullMapVisionAddr, g_fullMapVisionOrigBytes,
+                          sizeof(g_fullMapVisionOrigBytes)))
+        return false;
 
     if (!WriteCodeBytes(g_fullMapVisionAddr, FULL_MAP_VISION_PATCH,
                         sizeof(FULL_MAP_VISION_PATCH)))
@@ -763,20 +936,215 @@ static bool ApplyFullMapVisionPatch()
     return true;
 }
 
-static void RestoreFullMapVisionPatch()
+static bool RestoreLegacyFullMapVisionPatch()
 {
     if (!g_fullMapVisionPatched || !g_fullMapVisionAddr || !g_fullMapVisionOrigSaved)
-        return;
+        return true;
 
-    if (!WriteCodeBytes(g_fullMapVisionAddr, g_fullMapVisionOrigBytes,
+    if (!VisionBytesEqual(g_fullMapVisionAddr, FULL_MAP_VISION_PATCH, sizeof(FULL_MAP_VISION_PATCH)) ||
+        !WriteCodeBytes(g_fullMapVisionAddr, g_fullMapVisionOrigBytes,
                         sizeof(g_fullMapVisionOrigBytes)))
     {
         Log("[!] FullMapVision: restore failed\n");
-        return;
+        return false;
     }
 
     g_fullMapVisionPatched = false;
     Log("[-] FullMapVision disabled\n");
+    return true;
+}
+
+static uintptr_t ResolveEnhancedVisionFogState()
+{
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    uint32_t lowKey = 0, lowValue = 0, highKey = 0, highValue = 0;
+    if (!base ||
+        !SafeMemcpy(&lowKey, reinterpret_cast<const void*>(base + 0x3F94B88), sizeof(lowKey)) ||
+        !SafeMemcpy(&lowValue, reinterpret_cast<const void*>(base + 0x3EAF0B4), sizeof(lowValue)) ||
+        !SafeMemcpy(&highKey, reinterpret_cast<const void*>(base + 0x3EAD420), sizeof(highKey)) ||
+        !SafeMemcpy(&highValue, reinterpret_cast<const void*>(base + 0x3F94B8C), sizeof(highValue)))
+        return 0;
+    const uint32_t low = ~lowKey + lowValue;
+    const uint32_t high = highKey + highValue;
+    return static_cast<uintptr_t>((uint64_t{high} << 32) | low);
+}
+
+static bool ApplyEnhancedVisionFog()
+{
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    static constexpr uint8_t terrainEntry[] = {
+        0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x0F, 0xB6, 0xDA, 0x85, 0xC9,
+    };
+    static constexpr uint8_t alphaEntry[] = {
+        0x40, 0x53, 0x48, 0x81, 0xEC, 0x90, 0x01, 0x00, 0x00, 0x8B, 0xD9,
+    };
+    static constexpr uint8_t refreshEntry[] = {
+        0x48, 0x83, 0xEC, 0x28, 0x8B, 0x05, 0x5E, 0xE2, 0x4A, 0x03,
+    };
+    if (!base ||
+        !VisionBytesEqual(base + 0x242CFD0, terrainEntry, sizeof(terrainEntry)) ||
+        !VisionBytesEqual(base + 0x242E240, alphaEntry, sizeof(alphaEntry)) ||
+        !VisionBytesEqual(base + 0xA00B20, refreshEntry, sizeof(refreshEntry)))
+        return false;
+    const uintptr_t state = ResolveEnhancedVisionFogState();
+    uint8_t player = 0xFF;
+    if (!state ||
+        !SafeMemcpy(&player, reinterpret_cast<const void*>(g_enhancedVisionPlayer), sizeof(player)) ||
+        player >= 16 ||
+        !SafeMemcpy(&g_enhancedVisionFogMask, reinterpret_cast<const void*>(state + 0x10),
+                    sizeof(g_enhancedVisionFogMask)) ||
+        !SafeMemcpy(&g_enhancedVisionFogAlpha, reinterpret_cast<const void*>(state + 0x20 + player),
+                    sizeof(g_enhancedVisionFogAlpha)))
+        return false;
+    g_enhancedVisionFogPlayer = player;
+    g_enhancedVisionFogState = state;
+    __try
+    {
+        reinterpret_cast<void(__fastcall*)(uint32_t, uint8_t)>(base + 0x242CFD0)(0, 0);
+        reinterpret_cast<void(__fastcall*)(uint32_t, int32_t)>(base + 0x242E240)(player, 204800);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+    const uint32_t mask = UINT32_MAX;
+    const uint8_t alpha = 127;
+    const bool applied = ResolveEnhancedVisionFogState() == state &&
+        VisionBytesEqual(state + 0x10, reinterpret_cast<const uint8_t*>(&mask), sizeof(mask)) &&
+        VisionBytesEqual(state + 0x20 + player, &alpha, sizeof(alpha));
+    Log("[*] EnhancedVision fog: applied=%d player=%u savedMask=0x%08X savedAlpha=%u\n",
+        applied, static_cast<unsigned>(player), g_enhancedVisionFogMask,
+        static_cast<unsigned>(g_enhancedVisionFogAlpha));
+    return applied;
+}
+
+static bool RestoreEnhancedVisionFog()
+{
+    if (!g_enhancedVisionFogState)
+        return true;
+    const uintptr_t current = ResolveEnhancedVisionFogState();
+    if (!current)
+        return false;
+    if (current != g_enhancedVisionFogState)
+    {
+        Log("[*] EnhancedVision fog: state replaced; not writing the previous session address\n");
+        g_enhancedVisionFogState = 0;
+        return true;
+    }
+    if (!SafeMemcpy(reinterpret_cast<void*>(current + 0x10), &g_enhancedVisionFogMask,
+                    sizeof(g_enhancedVisionFogMask)) ||
+        !SafeMemcpy(reinterpret_cast<void*>(current + 0x20 + g_enhancedVisionFogPlayer),
+                    &g_enhancedVisionFogAlpha, sizeof(g_enhancedVisionFogAlpha)))
+        return false;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    __try
+    {
+        reinterpret_cast<void(__fastcall*)()>(base + 0xA00B20)();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+    if (!VisionBytesEqual(current + 0x10, reinterpret_cast<const uint8_t*>(&g_enhancedVisionFogMask),
+                          sizeof(g_enhancedVisionFogMask)) ||
+        !VisionBytesEqual(current + 0x20 + g_enhancedVisionFogPlayer, &g_enhancedVisionFogAlpha,
+                          sizeof(g_enhancedVisionFogAlpha)))
+        return false;
+    g_enhancedVisionFogState = 0;
+    Log("[-] EnhancedVision fog restored\n");
+    return true;
+}
+
+static bool RestoreEnhancedVision()
+{
+    InterlockedExchange(&g_enhancedVisionActive, 0);
+    if (g_enhancedVisionHookEnabled)
+    {
+        const MH_STATUS status = MH_DisableHook(reinterpret_cast<void*>(g_enhancedVisionEntry));
+        if (status != MH_OK && status != MH_ERROR_DISABLED)
+        {
+            Log("[!] EnhancedVision: disable failed: %s\n", MH_StatusToString(status));
+            return false;
+        }
+        g_enhancedVisionHookEnabled = false;
+    }
+    if (g_enhancedVisionEntry &&
+        !VisionBytesEqual(g_enhancedVisionEntry, VISION_ENTRY_ORIGINAL, sizeof(VISION_ENTRY_ORIGINAL)))
+    {
+        Log("[!] EnhancedVision: entry restoration could not be verified\n");
+        return false;
+    }
+    if (!RestoreEnhancedVisionFog())
+    {
+        Log("[!] EnhancedVision: fog restoration failed\n");
+        return false;
+    }
+    if (g_enhancedVisionAuxPatched)
+    {
+        if (!VisionBytesEqual(g_enhancedVisionAux, ENHANCED_VISION_AUX_PATCH,
+                              sizeof(ENHANCED_VISION_AUX_PATCH)) ||
+            !WriteCodeBytes(g_enhancedVisionAux, ENHANCED_VISION_AUX_ORIGINAL,
+                            sizeof(ENHANCED_VISION_AUX_ORIGINAL)) ||
+            !VisionBytesEqual(g_enhancedVisionAux, ENHANCED_VISION_AUX_ORIGINAL,
+                              sizeof(ENHANCED_VISION_AUX_ORIGINAL)))
+        {
+            Log("[!] EnhancedVision: auxiliary restore failed\n");
+            return false;
+        }
+        g_enhancedVisionAuxPatched = false;
+    }
+    return true;
+}
+
+static bool ApplyEnhancedVision()
+{
+    if (InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0)
+        return true;
+    if (!RestoreEnhancedVision() || !ResolveEnhancedVision())
+        return false;
+    if (!VisionBytesEqual(g_enhancedVisionEntry, VISION_ENTRY_ORIGINAL, sizeof(VISION_ENTRY_ORIGINAL)) ||
+        !VisionBytesEqual(g_enhancedVisionEntry + 0x49, ENHANCED_VISION_MASK_ORIGINAL,
+                  sizeof(ENHANCED_VISION_MASK_ORIGINAL)) ||
+        !VisionBytesEqual(g_enhancedVisionAux, ENHANCED_VISION_AUX_ORIGINAL,
+                          sizeof(ENHANCED_VISION_AUX_ORIGINAL)))
+        return false;
+    if (!WriteCodeBytes(g_enhancedVisionAux, ENHANCED_VISION_AUX_PATCH,
+                        sizeof(ENHANCED_VISION_AUX_PATCH)))
+        return false;
+    g_enhancedVisionAuxPatched = true;
+    const MH_STATUS status = MH_EnableHook(reinterpret_cast<void*>(g_enhancedVisionEntry));
+    if (status != MH_OK)
+    {
+        Log("[!] EnhancedVision: enable failed: %s\n", MH_StatusToString(status));
+        RestoreEnhancedVision();
+        return false;
+    }
+    g_enhancedVisionHookEnabled = true;
+    if (!ApplyEnhancedVisionFog())
+    {
+        Log("[!] EnhancedVision: fog initialization failed\n");
+        RestoreEnhancedVision();
+        return false;
+    }
+    InterlockedExchange(&g_enhancedVisionActive, 1);
+    Log("[+] EnhancedVision enabled\n");
+    return true;
+}
+
+static bool ApplyFullMapVisionPatch()
+{
+    const bool result = !IsDllUnloading() &&
+        (g_enhancedVisionSelected ? ApplyEnhancedVision() : ApplyLegacyFullMapVisionPatch());
+    g_fullMapVisionFailed = !result;
+    return result;
+}
+
+static bool RestoreFullMapVisionPatch()
+{
+    const bool enhanced = RestoreEnhancedVision();
+    const bool legacy = RestoreLegacyFullMapVisionPatch();
+    g_fullMapVisionFailed = !enhanced || !legacy;
+    return !g_fullMapVisionFailed;
 }
 
 static void UpdateFullMapVisionMapState(const char* mapPath, const char* mapDesc)
@@ -813,9 +1181,13 @@ static void UpdateFullMapVisionMapState(const char* mapPath, const char* mapDesc
 
 bool EnableFullMapVision()
 {
-    InterlockedExchange(&g_fullMapVisionRequested, 1);
-
     AcquireSRWLockExclusive(&g_fullMapVisionLock);
+    if (IsDllUnloading())
+    {
+        ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+        return false;
+    }
+    InterlockedExchange(&g_fullMapVisionRequested, 1);
     const LONG mapIndex = InterlockedCompareExchange(&g_fullMapVisionMapIndex, 0, 0);
     const bool result = (!FULL_MAP_VISION_MAP_LIMIT_ENABLED || mapIndex >= 0)
         ? ApplyFullMapVisionPatch()
@@ -829,8 +1201,8 @@ bool EnableFullMapVision()
 
 void DisableFullMapVision()
 {
-    InterlockedExchange(&g_fullMapVisionRequested, 0);
     AcquireSRWLockExclusive(&g_fullMapVisionLock);
+    InterlockedExchange(&g_fullMapVisionRequested, 0);
     RestoreFullMapVisionPatch();
     ReleaseSRWLockExclusive(&g_fullMapVisionLock);
 }
@@ -843,9 +1215,60 @@ bool IsFullMapVisionEnabled()
 bool IsFullMapVisionApplied()
 {
     AcquireSRWLockShared(&g_fullMapVisionLock);
-    const bool applied = g_fullMapVisionPatched;
+    const bool applied = !g_fullMapVisionFailed && (g_fullMapVisionPatched ||
+        (g_enhancedVisionAuxPatched && g_enhancedVisionHookEnabled &&
+         InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0));
     ReleaseSRWLockShared(&g_fullMapVisionLock);
+    static ULONGLONG lastReport = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) && now - lastReport >= 5000)
+    {
+        lastReport = now;
+        Log("[*] EnhancedVision diagnostics: calls=%ld eligible=%ld special=%ld changed=%ld "
+            "players=0x%08lX originalResults=0x%08lX local=%ld excluded=%ld\n",
+            InterlockedCompareExchange(&g_visionCalls, 0, 0),
+            InterlockedCompareExchange(&g_visionEligible, 0, 0),
+            InterlockedCompareExchange(&g_visionSpecial, 0, 0),
+            InterlockedCompareExchange(&g_visionChanged, 0, 0),
+            InterlockedCompareExchange(&g_visionPlayers, 0, 0),
+            InterlockedCompareExchange(&g_visionOriginalResults, 0, 0),
+            InterlockedCompareExchange(&g_visionLastLocalPlayer, 0, 0),
+            InterlockedCompareExchange(&g_visionLastExcluded, 0, 0));
+    }
     return applied;
+}
+
+bool SetFullMapVisionEnhanced(bool enhanced)
+{
+    AcquireSRWLockExclusive(&g_fullMapVisionLock);
+    if (IsDllUnloading() || !RestoreFullMapVisionPatch())
+    {
+        ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+        return false;
+    }
+    g_enhancedVisionSelected = enhanced;
+    const bool shouldApply = IsFullMapVisionEnabled() &&
+        (!FULL_MAP_VISION_MAP_LIMIT_ENABLED ||
+         InterlockedCompareExchange(&g_fullMapVisionMapIndex, 0, 0) >= 0);
+    const bool result = !shouldApply || ApplyFullMapVisionPatch();
+    ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+    return result;
+}
+
+bool IsFullMapVisionEnhanced()
+{
+    AcquireSRWLockShared(&g_fullMapVisionLock);
+    const bool selected = g_enhancedVisionSelected;
+    ReleaseSRWLockShared(&g_fullMapVisionLock);
+    return selected;
+}
+
+bool HasFullMapVisionError()
+{
+    AcquireSRWLockShared(&g_fullMapVisionLock);
+    const bool failed = g_fullMapVisionFailed;
+    ReleaseSRWLockShared(&g_fullMapVisionLock);
+    return failed;
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -1088,13 +1511,14 @@ float GetExperienceMultiplier()
     return static_cast<float>(InterlockedCompareExchange(&g_experienceMultiplier, 0, 0));
 }
 
-void CleanupGameFeatures()
+bool CleanupGameFeatures()
 {
     // 必须在 MH_Uninitialize 和 DLL 卸载前执行：先阻止 detour 修改 payload，
     // 再恢复所有直接写入 SC2 代码段的补丁。
     EnableExperienceMultiplier(false);
     DisableFullMapVision();
     DisableMasteryMax();
+    return !HasFullMapVisionError() && !IsMasteryMaxEnabled();
 }
 
 // ════════════════════════════════════════════════════════════════

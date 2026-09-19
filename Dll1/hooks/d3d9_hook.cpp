@@ -592,19 +592,30 @@ bool SetupHooks()
     return true;
 }
 
-void CleanupHooks()
+bool CleanupHooks()
 {
     BeginDllUnload();
     const MH_STATUS disableStatus = MH_DisableHook(MH_ALL_HOOKS);
     if (disableStatus != MH_OK && disableStatus != MH_ERROR_NOT_CREATED)
+    {
         Log("[!] MH_DisableHook cleanup failed: %s\n", MH_StatusToString(disableStatus));
+        return false;
+    }
     DetachOverlayWindowProc();
     WaitForHookCallbacks();
 
-    CleanupGameFeatures();
+    if (!CleanupGameFeatures())
+    {
+        Log("[!] Feature restoration failed; keeping DLL and trampolines loaded\n");
+        return false;
+    }
     const MH_STATUS uninitializeStatus = MH_Uninitialize();
     if (uninitializeStatus != MH_OK && uninitializeStatus != MH_ERROR_NOT_INITIALIZED)
+    {
         Log("[!] MH_Uninitialize cleanup failed: %s\n", MH_StatusToString(uninitializeStatus));
+        return false;
+    }
     ShutdownOverlay();
     Log("[+] Hooks cleanup done\n");
+    return true;
 }

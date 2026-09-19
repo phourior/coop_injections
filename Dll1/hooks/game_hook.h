@@ -84,6 +84,9 @@ bool EnableFullMapVision();
 void DisableFullMapVision();
 bool IsFullMapVisionEnabled();
 bool IsFullMapVisionApplied();
+bool SetFullMapVisionEnhanced(bool enhanced);
+bool IsFullMapVisionEnhanced();
+bool HasFullMapVisionError();
 
 // ─── 经验倍率（MinHook，1-30 倍） ───
 // SetupExperienceHooks 必须在 MH_Initialize 之后、MH_EnableHook(MH_ALL_HOOKS)
@@ -95,4 +98,4 @@ void SetExperienceMultiplier(float multiplier);
 float GetExperienceMultiplier();
 
 // 卸载 DLL 前恢复所有直接代码补丁和功能状态。
-void CleanupGameFeatures();
+bool CleanupGameFeatures();

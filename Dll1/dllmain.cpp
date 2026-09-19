@@ -60,7 +60,11 @@ static DWORD WINAPI MainThread(LPVOID)
 
     // END 同时请求唯一注入器实例正常退出，然后再执行 DLL 的安全卸载流程。
     RequestInjectorExit();
-    CleanupHooks();
+    if (!CleanupHooks())
+    {
+        Log("[!] DLL unload aborted after cleanup failure; restart the game before reinjecting\n");
+        return 1;
+    }
     FreeLibraryAndExitThread(g_hModule, 0);
     return 0;
 }

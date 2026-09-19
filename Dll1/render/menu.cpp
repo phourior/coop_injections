@@ -225,7 +225,16 @@ void DrawMenu()
         else
             DisableFullMapVision();
     }
-    if (fullMapVision)
+    ImGui::SameLine();
+    bool enhancedVision = IsFullMapVisionEnhanced();
+    if (ImGui::Checkbox("增强版", &enhancedVision))
+        SetFullMapVisionEnhanced(enhancedVision);
+    if (HasFullMapVisionError())
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
+            "状态: 应用或恢复失败，请查看日志");
+    }
+    else if (IsFullMapVisionEnabled())
     {
         const bool applied = IsFullMapVisionApplied();
         ImGui::TextColored(applied ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f)
