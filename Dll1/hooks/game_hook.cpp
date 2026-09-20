@@ -592,14 +592,6 @@ static bool g_enhancedVisionHookEnabled = false;
 static bool g_enhancedVisionAuxPatched = false;
 static bool g_fullMapVisionFailed = false;
 static volatile LONG g_enhancedVisionActive = 0;
-static volatile LONG g_visionCalls = 0;
-static volatile LONG g_visionEligible = 0;
-static volatile LONG g_visionSpecial = 0;
-static volatile LONG g_visionChanged = 0;
-static volatile LONG g_visionPlayers = 0;
-static volatile LONG g_visionOriginalResults = 0;
-static volatile LONG g_visionLastLocalPlayer = -1;
-static volatile LONG g_visionLastExcluded = -1;
 static uintptr_t g_enhancedVisionFogState = 0;
 static uint32_t g_enhancedVisionFogMask = 0;
 static uint8_t g_enhancedVisionFogAlpha = 0;
@@ -655,9 +647,6 @@ static uint8_t __fastcall HookUnitVisibility(uintptr_t object, uint8_t player, u
     uint8_t special = 0;
     uint64_t state = 0;
     uint64_t token = 0;
-    InterlockedIncrement(&g_visionCalls);
-    if (player < 32)
-        InterlockedOr(&g_visionPlayers, static_cast<LONG>(uint32_t{1} << player));
     const bool enhance = !IsDllUnloading() &&
         InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0 &&
         SafeMemcpy(&localPlayer, reinterpret_cast<const void*>(g_enhancedVisionPlayer), 1) &&
@@ -667,27 +656,16 @@ static uint8_t __fastcall HookUnitVisibility(uintptr_t object, uint8_t player, u
         SafeMemcpy(&special, reinterpret_cast<const void*>(unit + 0x118), 1) &&
         SafeMemcpy(&state, reinterpret_cast<const void*>(unit + 0x24), sizeof(state)) &&
         SafeMemcpy(&token, reinterpret_cast<const void*>(unit + 8), sizeof(token));
-    InterlockedExchange(&g_visionLastLocalPlayer, localPlayer);
-    InterlockedExchange(&g_visionLastExcluded, excluded);
-    if (enhance)
-        InterlockedIncrement(&g_visionEligible);
     uint8_t result;
     if (enhance && (special & 0x40))
     {
-        InterlockedIncrement(&g_visionSpecial);
         result = IsEnhancedVisionArtifact(token) ? 12 : 1;
     }
     else
     {
         result = g_origUnitVisibility(object, player, flags);
         if (enhance)
-        {
-            if (result < 32)
-                InterlockedOr(&g_visionOriginalResults, static_cast<LONG>(uint32_t{1} << result));
-            if (result < 8)
-                InterlockedIncrement(&g_visionChanged);
             result = EnhancedVisionResult(result, state);
-        }
     }
     LeaveHookCallback();
     return result;
@@ -1219,22 +1197,6 @@ bool IsFullMapVisionApplied()
         (g_enhancedVisionAuxPatched && g_enhancedVisionHookEnabled &&
          InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0));
     ReleaseSRWLockShared(&g_fullMapVisionLock);
-    static ULONGLONG lastReport = 0;
-    const ULONGLONG now = GetTickCount64();
-    if (InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) && now - lastReport >= 5000)
-    {
-        lastReport = now;
-        Log("[*] EnhancedVision diagnostics: calls=%ld eligible=%ld special=%ld changed=%ld "
-            "players=0x%08lX originalResults=0x%08lX local=%ld excluded=%ld\n",
-            InterlockedCompareExchange(&g_visionCalls, 0, 0),
-            InterlockedCompareExchange(&g_visionEligible, 0, 0),
-            InterlockedCompareExchange(&g_visionSpecial, 0, 0),
-            InterlockedCompareExchange(&g_visionChanged, 0, 0),
-            InterlockedCompareExchange(&g_visionPlayers, 0, 0),
-            InterlockedCompareExchange(&g_visionOriginalResults, 0, 0),
-            InterlockedCompareExchange(&g_visionLastLocalPlayer, 0, 0),
-            InterlockedCompareExchange(&g_visionLastExcluded, 0, 0));
-    }
     return applied;
 }
 
