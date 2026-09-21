@@ -87,6 +87,7 @@ bool IsFullMapVisionApplied();
 bool SetFullMapVisionEnhanced(bool enhanced);
 bool IsFullMapVisionEnhanced();
 bool HasFullMapVisionError();
+void UpdateFullMapVisionRuntime();
 
 // ─── 经验倍率（MinHook，1-30 倍） ───
 // SetupExperienceHooks 必须在 MH_Initialize 之后、MH_EnableHook(MH_ALL_HOOKS)

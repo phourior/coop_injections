@@ -38,6 +38,7 @@ static volatile LONG      g_presentResultLogged = 0;
 
 static void RenderFromSwapChain(IDirect3DSwapChain9* swapChain)
 {
+    UpdateFullMapVisionRuntime();
     if (!IsDllUnloading() && !IsOverlayReady())
     {
         __try

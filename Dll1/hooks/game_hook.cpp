@@ -947,6 +947,8 @@ static uintptr_t ResolveEnhancedVisionFogState()
     return static_cast<uintptr_t>((uint64_t{high} << 32) | low);
 }
 
+static bool RestoreEnhancedVisionFog();
+
 static bool ApplyEnhancedVisionFog()
 {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
@@ -966,14 +968,23 @@ static bool ApplyEnhancedVisionFog()
         return false;
     const uintptr_t state = ResolveEnhancedVisionFogState();
     uint8_t player = 0xFF;
+    uint32_t currentMask = 0;
+    uint8_t currentAlpha = 0;
     if (!state ||
         !SafeMemcpy(&player, reinterpret_cast<const void*>(g_enhancedVisionPlayer), sizeof(player)) ||
         player >= 16 ||
-        !SafeMemcpy(&g_enhancedVisionFogMask, reinterpret_cast<const void*>(state + 0x10),
-                    sizeof(g_enhancedVisionFogMask)) ||
-        !SafeMemcpy(&g_enhancedVisionFogAlpha, reinterpret_cast<const void*>(state + 0x20 + player),
-                    sizeof(g_enhancedVisionFogAlpha)))
+        !SafeMemcpy(&currentMask, reinterpret_cast<const void*>(state + 0x10), sizeof(currentMask)) ||
+        !SafeMemcpy(&currentAlpha, reinterpret_cast<const void*>(state + 0x20 + player), sizeof(currentAlpha)))
         return false;
+    if (state == g_enhancedVisionFogState && player != g_enhancedVisionFogPlayer)
+        return RestoreEnhancedVisionFog() && ApplyEnhancedVisionFog();
+    const bool sameState = state == g_enhancedVisionFogState;
+    if (sameState && currentMask == UINT32_MAX && currentAlpha == 127)
+        return true;
+    if (!sameState || currentMask != UINT32_MAX)
+        g_enhancedVisionFogMask = currentMask;
+    if (!sameState || currentAlpha != 127)
+        g_enhancedVisionFogAlpha = currentAlpha;
     g_enhancedVisionFogPlayer = player;
     g_enhancedVisionFogState = state;
     __try
@@ -990,9 +1001,10 @@ static bool ApplyEnhancedVisionFog()
     const bool applied = ResolveEnhancedVisionFogState() == state &&
         VisionBytesEqual(state + 0x10, reinterpret_cast<const uint8_t*>(&mask), sizeof(mask)) &&
         VisionBytesEqual(state + 0x20 + player, &alpha, sizeof(alpha));
-    Log("[*] EnhancedVision fog: applied=%d player=%u savedMask=0x%08X savedAlpha=%u\n",
-        applied, static_cast<unsigned>(player), g_enhancedVisionFogMask,
-        static_cast<unsigned>(g_enhancedVisionFogAlpha));
+    if (applied)
+        Log("[*] EnhancedVision fog: applied=%d player=%u savedMask=0x%08X savedAlpha=%u\n",
+            applied, static_cast<unsigned>(player), g_enhancedVisionFogMask,
+            static_cast<unsigned>(g_enhancedVisionFogAlpha));
     return applied;
 }
 
@@ -1009,6 +1021,16 @@ static bool RestoreEnhancedVisionFog()
         g_enhancedVisionFogState = 0;
         return true;
     }
+    uint32_t currentMask = 0;
+    uint8_t currentAlpha = 0;
+    if (!SafeMemcpy(&currentMask, reinterpret_cast<const void*>(current + 0x10), sizeof(currentMask)) ||
+        !SafeMemcpy(&currentAlpha, reinterpret_cast<const void*>(current + 0x20 + g_enhancedVisionFogPlayer),
+                    sizeof(currentAlpha)))
+        return false;
+    if (currentMask != UINT32_MAX)
+        g_enhancedVisionFogMask = currentMask;
+    if (currentAlpha != 127)
+        g_enhancedVisionFogAlpha = currentAlpha;
     if (!SafeMemcpy(reinterpret_cast<void*>(current + 0x10), &g_enhancedVisionFogMask,
                     sizeof(g_enhancedVisionFogMask)) ||
         !SafeMemcpy(reinterpret_cast<void*>(current + 0x20 + g_enhancedVisionFogPlayer),
@@ -1231,6 +1253,28 @@ bool HasFullMapVisionError()
     const bool failed = g_fullMapVisionFailed;
     ReleaseSRWLockShared(&g_fullMapVisionLock);
     return failed;
+}
+
+void UpdateFullMapVisionRuntime()
+{
+    if (IsDllUnloading() || !TryAcquireSRWLockExclusive(&g_fullMapVisionLock))
+        return;
+    static ULONGLONG lastCheck = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!IsDllUnloading() && now - lastCheck >= 1000 &&
+        g_enhancedVisionSelected && IsFullMapVisionEnabled() &&
+        g_enhancedVisionHookEnabled && g_enhancedVisionAuxPatched &&
+        InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0 &&
+        (!FULL_MAP_VISION_MAP_LIMIT_ENABLED ||
+         InterlockedCompareExchange(&g_fullMapVisionMapIndex, 0, 0) >= 0))
+    {
+        lastCheck = now;
+        const bool applied = ApplyEnhancedVisionFog();
+        if (!applied && !g_fullMapVisionFailed)
+            Log("[!] EnhancedVision fog: state not ready; retrying while enabled\n");
+        g_fullMapVisionFailed = !applied;
+    }
+    ReleaseSRWLockExclusive(&g_fullMapVisionLock);
 }
 
 // ════════════════════════════════════════════════════════════════
