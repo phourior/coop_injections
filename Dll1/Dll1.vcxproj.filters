@@ -57,6 +57,9 @@
     <ClInclude Include="hooks\game_hook.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="hooks\game_hook_internal.h">
+      <Filter>头文件\hooks</Filter>
+    </ClInclude>
     <ClInclude Include="core\memory.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -115,6 +118,24 @@
     </ClCompile>
     <ClCompile Include="hooks\game_hook.cpp">
       <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\game_hook_nnet.cpp">
+      <Filter>源文件\hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\game_hook_experience.cpp">
+      <Filter>源文件\hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\game_hook_leader_panel.cpp">
+      <Filter>源文件\hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\game_hook_mastery.cpp">
+      <Filter>源文件\hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\game_hook_vision.cpp">
+      <Filter>源文件\hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="hooks\game_hook_observer_vision.cpp">
+      <Filter>源文件\hooks</Filter>
     </ClCompile>
     <ClCompile Include="ext\imgui\imgui.cpp">
       <Filter>源文件</Filter>

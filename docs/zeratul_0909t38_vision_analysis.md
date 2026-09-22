@@ -85,7 +85,7 @@ mov esi, 2
 
 ## 工程集成
 
-实现位于 `Dll1/hooks/game_hook.cpp`，GUI 位于 `Dll1/render/menu.cpp`。
+实现位于 `Dll1/hooks/game_hook_vision.cpp` 和 `Dll1/hooks/game_hook_observer_vision.cpp`，GUI 位于 `Dll1/render/menu.cpp`。
 
 - “全图视野”是总开关；旁边“增强版”仅选择实现，默认关闭。总开关关闭时选择模式不应用补丁。
 - 增强版使用 C++ 和已有 MinHook 重写已确认的判断及附加补丁，不复制训练器机器码或其他功能。

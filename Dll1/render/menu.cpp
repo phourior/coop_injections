@@ -232,7 +232,7 @@ void DrawMenu()
         SetFullMapVisionEnhanced(enhancedVision);
     ImGui::EndDisabled();
     bool observerVision = IsFullMapVisionObserver();
-    if (ImGui::Checkbox("观察者模式", &observerVision))
+    if (ImGui::Checkbox("观察者模式（实验）", &observerVision))
         SetFullMapVisionObserver(observerVision);
     if (HasFullMapVisionError())
     {
@@ -242,9 +242,13 @@ void DrawMenu()
     else if (IsFullMapVisionEnabled() || IsFullMapVisionObserver())
     {
         const bool applied = IsFullMapVisionApplied();
+        const bool waitingForSupportedMap =
+            FULL_MAP_VISION_MAP_LIMIT_ENABLED && !IsFullMapVisionMapAllowed();
         ImGui::TextColored(applied ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f)
                                    : ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
-            applied ? "状态: 已应用" : "状态: 等待支持的合作地图");
+            applied ? "状态: 已应用" : waitingForSupportedMap
+            ? "状态: 等待支持的合作地图"
+            : "状态: 等待游戏内状态");
     }
 
     bool leaderPanel = IsLeaderPanelEnabled();

@@ -181,6 +181,12 @@
     <ClCompile Include="core\game_data.cpp" />
     <ClCompile Include="hooks\d3d9_hook.cpp" />
     <ClCompile Include="hooks\game_hook.cpp" />
+    <ClCompile Include="hooks\game_hook_experience.cpp" />
+    <ClCompile Include="hooks\game_hook_leader_panel.cpp" />
+    <ClCompile Include="hooks\game_hook_mastery.cpp" />
+    <ClCompile Include="hooks\game_hook_nnet.cpp" />
+    <ClCompile Include="hooks\game_hook_observer_vision.cpp" />
+    <ClCompile Include="hooks\game_hook_vision.cpp" />
     <ClCompile Include="render\overlay.cpp" />
     <ClCompile Include="render\menu.cpp" />
     <ClCompile Include="ext\imgui\imgui.cpp">

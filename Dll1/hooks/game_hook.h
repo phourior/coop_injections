@@ -80,10 +80,13 @@ bool IsMasteryMaxEnabled();
 // ─── 全图视野补丁（特征码定位，动态开关） ───
 // 开启后进入 15 张支持的合作地图时自动应用补丁，离开时自动恢复；地图路径
 // 和显示标识都会参与子串匹配。找不到特征时不使用固定 RVA 回退。
+inline constexpr bool FULL_MAP_VISION_MAP_LIMIT_ENABLED = true; //地图限制开关，false为不限地图
+
 bool EnableFullMapVision();
 void DisableFullMapVision();
 bool IsFullMapVisionEnabled();
 bool IsFullMapVisionApplied();
+bool IsFullMapVisionMapAllowed();
 bool SetFullMapVisionEnhanced(bool enhanced);
 bool IsFullMapVisionEnhanced();
 bool SetFullMapVisionObserver(bool observer);

@@ -1,7 +1,7 @@
 # 全图视野与经验倍率：SC2 版本升级维护指南
 
 > 当前验证版本：`SC2_x64.exe Base97579`  
-> 对应实现：`Dll1/hooks/game_hook.cpp`、`Dll1/render/menu.cpp`
+> 对应实现：`Dll1/hooks/game_hook_vision.cpp`、`Dll1/hooks/game_hook_observer_vision.cpp`、`Dll1/hooks/game_hook_experience.cpp`、`Dll1/render/menu.cpp`
 
 ## 一、维护原则
 

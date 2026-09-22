@@ -209,7 +209,10 @@ SC2 离开 Lobby 后可能继续保留原 `GameLobby*` 和地图标题，因此�
 | `Dll1/core/game_data.cpp` | `ScanCBattleNetGlobal()` 特征扫描和扫描预热 |
 | `Dll1/core/game_data.h` | 游戏数据扫描接口 |
 | `Dll1/core/memory.h` | `ReadMemory<T>()`、`SafeMemcpy()` 和 `PatternScan()` |
-| `Dll1/hooks/game_hook.cpp` | 大厅 Hook、快照、反向字段扫描与全图视野状态 |
+| `Dll1/hooks/game_hook.cpp` | 大厅 Hook、快照与反向字段扫描 |
+| `Dll1/hooks/game_hook_leader_panel.cpp` | 左上角统计面板可见性与热键过滤 |
+| `Dll1/hooks/game_hook_vision.cpp` | 全图视野状态机与模式调度 |
+| `Dll1/hooks/game_hook_observer_vision.cpp` | 观察者视野 / Fog Hook 与增强视野底层实现 |
 | `Dll1/hooks/game_hook.h` | `RawLobbyData`、`LobbyData` 和公开状态接口 |
 | `Dll1/render/menu.cpp` | 从 `SnapshotLobbyData()` 显示 `mapPath` |
 | `Dll1/render/overlay.cpp` | 提供渲染帧和 150 ms 游戏数据缓存调度入口 |

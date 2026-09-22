@@ -611,6 +611,9 @@ bool SetupHooks()
 
 bool CleanupHooks()
 {
+    // 先关闭所有 detour 的功能路径；观察者模式恢复会在渲染线程等待其
+    // 专用回调门清空，避免 Fog/单位回调与代码、状态恢复并发执行。
+    BeginDllUnload();
     InterlockedExchange(&g_featureCleanupSucceeded, 0);
     InterlockedExchange(&g_featureCleanupState, 1);
     const ULONGLONG cleanupDeadline = GetTickCount64() + 5000;
@@ -626,7 +629,6 @@ bool CleanupHooks()
         return false;
     }
 
-    BeginDllUnload();
     DetachOverlayWindowProc();
     WaitForHookCallbacks();
     const MH_STATUS disableStatus = MH_DisableHook(MH_ALL_HOOKS);
