@@ -226,21 +226,35 @@ void DrawMenu()
             DisableFullMapVision();
     }
     ImGui::SameLine();
+    ImGui::BeginDisabled(IsFullMapVisionObserver());
     bool enhancedVision = IsFullMapVisionEnhanced();
     if (ImGui::Checkbox("增强版", &enhancedVision))
         SetFullMapVisionEnhanced(enhancedVision);
+    ImGui::EndDisabled();
+    bool observerVision = IsFullMapVisionObserver();
+    if (ImGui::Checkbox("观察者模式", &observerVision))
+        SetFullMapVisionObserver(observerVision);
     if (HasFullMapVisionError())
     {
         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
             "状态: 应用或恢复失败，请查看日志");
     }
-    else if (IsFullMapVisionEnabled())
+    else if (IsFullMapVisionEnabled() || IsFullMapVisionObserver())
     {
         const bool applied = IsFullMapVisionApplied();
         ImGui::TextColored(applied ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f)
                                    : ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
             applied ? "状态: 已应用" : "状态: 等待支持的合作地图");
     }
+
+    bool leaderPanel = IsLeaderPanelEnabled();
+    if (ImGui::Checkbox("左上角统计（实验）", &leaderPanel))
+        EnableLeaderPanel(leaderPanel);
+    if (HasLeaderPanelError())
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f), "统计面板: 应用或恢复失败");
+    else if (leaderPanel)
+        ImGui::TextUnformatted(IsLeaderPanelApplied()
+            ? "统计面板: 已请求显示" : "统计面板: 等待控件");
 
     bool experienceMultiplier = IsExperienceMultiplierEnabled();
     if (ImGui::Checkbox("经验倍率", &experienceMultiplier))

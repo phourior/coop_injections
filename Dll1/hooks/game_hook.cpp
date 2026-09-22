@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cwchar>
 #include <limits>
+#include <intrin.h>
 #include <tlhelp32.h>
 #include <vector>
 
@@ -572,6 +573,19 @@ static_assert(EnhancedVisionResult(7, uint64_t{1} << 30) == 9);
 static_assert(EnhancedVisionResult(0, uint64_t{3} << 29) == 8);
 static_assert(EnhancedVisionResult(12, uint64_t{1} << 30) == 12);
 
+static constexpr bool PreserveExploredVisibility(uint8_t original, uint8_t cached)
+{
+    return original == 4 || original == 5 ||
+        ((cached == 4 || cached == 5) && original <= 5);
+}
+
+static_assert(PreserveExploredVisibility(4, 8));
+static_assert(PreserveExploredVisibility(5, 5));
+static_assert(PreserveExploredVisibility(2, 4));
+static_assert(!PreserveExploredVisibility(8, 4));
+static_assert(!PreserveExploredVisibility(2, 2));
+static_assert(!PreserveExploredVisibility(9, 5));
+
 // 原字节只在首次启用时保存。后续关闭必须恢复同一进程、同一版本的字节，
 // 不能把 Base97579 的原字节硬编码进 DLL。
 static uintptr_t g_fullMapVisionAddr = 0;
@@ -588,6 +602,53 @@ static uintptr_t g_enhancedVisionEntry = 0;
 static uintptr_t g_enhancedVisionAux = 0;
 static uintptr_t g_enhancedVisionPlayer = 0;
 static bool g_enhancedVisionSelected = false;
+static bool g_observerVisionSelected = false;
+static uintptr_t g_observerDisplaySelection = 0;
+static bool g_observerDisplayPatched = false;
+static constexpr uint8_t OBSERVER_DISPLAY_ORIGINAL[] = {
+    0x0F, 0xB6, 0x84, 0x39, 0xD8, 0x08, 0x00, 0x00
+};
+static constexpr uint8_t OBSERVER_DISPLAY_PATCH[] = {
+    0x0F, 0xB6, 0x87, 0xE8, 0x08, 0x00, 0x00, 0x90
+};
+using ObserverPlayersFn = uint32_t(__fastcall*)();
+static ObserverPlayersFn g_originalObserverPlayers = nullptr;
+static uintptr_t g_observerPlayersEntry = 0;
+static bool g_observerPlayersEnabled = false;
+using PlayerSetFn = uint32_t(__fastcall*)(uint32_t);
+static PlayerSetFn g_playerSet = nullptr;
+using ViewPlayerFn = uint8_t(__fastcall*)();
+static ViewPlayerFn g_originalViewPlayer = nullptr;
+static uintptr_t g_observerViewPlayerEntry = 0;
+static bool g_observerViewPlayerEnabled = false;
+static volatile LONG g_observerViewPlayerLogged = 0;
+using FogViewFn = uintptr_t(__fastcall*)(uint32_t, uint32_t, uint8_t);
+static FogViewFn g_originalFogView = nullptr;
+static uintptr_t g_observerFogEntry = 0;
+static bool g_observerFogEnabled = false;
+static volatile LONG g_observerFogInvocationLogged = 0;
+using FogBufferFn = uintptr_t(__fastcall*)(uint8_t, uintptr_t, uintptr_t);
+using FogTextureFn = uintptr_t(__fastcall*)(uintptr_t, uint8_t);
+static FogBufferFn g_originalFogBuffer = nullptr;
+static FogTextureFn g_originalFogTexture = nullptr;
+static bool g_observerFogReadersEnabled = false;
+static volatile LONG g_observerFogReaderLogged = 0;
+static SRWLOCK g_observerFogLock = SRWLOCK_INIT;
+static uintptr_t g_observerFogState = 0;
+static uint32_t g_observerFogFirst = 0;
+static uint32_t g_observerFogSecond = 0;
+static constexpr uint8_t OBSERVER_FOG_ORIGINAL[] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10,
+    0x57, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00
+};
+static thread_local bool g_observerVisibilityQuery = false;
+static volatile LONG g_observerPlayersQueryLogged = 0;
+static volatile LONG g_observerVisibilityResultLogged = 0;
+static volatile LONG g_observerOwnerResultLogged[17] = {};
+static constexpr uint8_t OBSERVER_PLAYERS_ORIGINAL[] = {
+    0x48, 0x83, 0xEC, 0x28, 0xE8, 0xD7, 0x63, 0x7C, 0xFF,
+    0x8B, 0x0D, 0x21, 0x6C, 0x55, 0x03
+};
 static bool g_enhancedVisionHookEnabled = false;
 static bool g_enhancedVisionAuxPatched = false;
 static bool g_fullMapVisionFailed = false;
@@ -638,17 +699,110 @@ static bool IsEnhancedVisionArtifact(uint64_t token)
     return false;
 }
 
+static uint32_t __fastcall HookObserverPlayers()
+{
+    if (g_observerVisibilityQuery)
+    {
+        const uint32_t players = g_playerSet(1) | g_playerSet(2);
+        if (InterlockedCompareExchange(&g_observerPlayersQueryLogged, 1, 0) == 0)
+            Log("[*] ObserverVision: unit query uses player set 0x%08X\n", players);
+        return players;
+    }
+    EnterHookCallback();
+    const uint32_t result = g_originalObserverPlayers();
+    LeaveHookCallback();
+    return result;
+}
+
+static uint8_t QueryObserverVisibility(uintptr_t object, uint8_t flags)
+{
+    const bool previous = g_observerVisibilityQuery;
+    uint8_t result = 0;
+    g_observerVisibilityQuery = true;
+    __try
+    {
+        result = g_origUnitVisibility(object, 16, flags);
+    }
+    __finally
+    {
+        g_observerVisibilityQuery = previous;
+    }
+    if (InterlockedCompareExchange(&g_observerVisibilityResultLogged, 1, 0) == 0)
+        Log("[*] ObserverVision: first player-16 unit visibility result=%u flags=%u\n",
+            static_cast<unsigned>(result), static_cast<unsigned>(flags));
+    return result;
+}
+
+static uint8_t __fastcall HookObserverViewPlayer()
+{
+    EnterHookCallback();
+    uint8_t player = g_originalViewPlayer();
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const uintptr_t callerRva = base && caller >= base ? caller - base : 0;
+    const bool observerMode = !IsDllUnloading() &&
+        InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) == 2;
+    const bool observerRenderQuery = callerRva == 0xA035CA ||
+        callerRva == 0x1CE7E9D || callerRva == 0x1CE8AA2 ||
+        callerRva == 0x1CE8FD4 || callerRva == 0x1CE90F6;
+    if (observerMode && observerRenderQuery)
+    {
+        player = 16;
+        if (InterlockedCompareExchange(&g_observerViewPlayerLogged, 1, 0) == 0)
+            Log("[*] ObserverVision: render view-player queries use observer player\n");
+    }
+    LeaveHookCallback();
+    return player;
+}
+
 static uint8_t __fastcall HookUnitVisibility(uintptr_t object, uint8_t player, uint8_t flags)
 {
     EnterHookCallback();
     uint8_t localPlayer = 0xFF;
+    const LONG mode = InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0);
+    const uint8_t original = g_origUnitVisibility(object, player, flags);
+    if (!IsDllUnloading() && (mode == 1 || mode == 2) && object && player < 16 &&
+        SafeMemcpy(&localPlayer, reinterpret_cast<const void*>(g_enhancedVisionPlayer), 1) &&
+        player == localPlayer)
+    {
+        uint8_t cached = 0;
+        if (!SafeMemcpy(&cached, reinterpret_cast<const void*>(object + 0x8D8 + player), 1) ||
+            PreserveExploredVisibility(original, cached))
+        {
+            LeaveHookCallback();
+            return original;
+        }
+    }
+    if (!IsDllUnloading() && mode == 2 && object && player == 16)
+    {
+        const uint8_t result = QueryObserverVisibility(object, flags);
+        uintptr_t unit = 0;
+        uint8_t owner = 0xFF;
+        uint8_t current = 0;
+        uint8_t observerCache = 0;
+        SafeMemcpy(&unit, reinterpret_cast<const void*>(object + 0x7A0), sizeof(unit));
+        if (unit)
+            SafeMemcpy(&owner, reinterpret_cast<const void*>(unit + 0x40), 1);
+        SafeMemcpy(&current, reinterpret_cast<const void*>(object + 0x8E9), 1);
+        SafeMemcpy(&observerCache, reinterpret_cast<const void*>(object + 0x8E8), 1);
+        if (owner <= 16 &&
+            InterlockedCompareExchange(&g_observerOwnerResultLogged[owner], 1, 0) == 0)
+        {
+            Log("[*] ObserverVision: owner=%u native16=%u union=%u current=%u cache16=%u flags=%u\n",
+                static_cast<unsigned>(owner), static_cast<unsigned>(original),
+                static_cast<unsigned>(result), static_cast<unsigned>(current),
+                static_cast<unsigned>(observerCache), static_cast<unsigned>(flags));
+        }
+        LeaveHookCallback();
+        return result;
+    }
     uintptr_t unit = 0;
     int8_t excluded = 0;
     uint8_t special = 0;
     uint64_t state = 0;
     uint64_t token = 0;
     const bool enhance = !IsDllUnloading() &&
-        InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0 &&
+        mode == 1 &&
         SafeMemcpy(&localPlayer, reinterpret_cast<const void*>(g_enhancedVisionPlayer), 1) &&
         player == localPlayer && object &&
         SafeMemcpy(&unit, reinterpret_cast<const void*>(object + 0x7A0), sizeof(unit)) && unit &&
@@ -663,7 +817,7 @@ static uint8_t __fastcall HookUnitVisibility(uintptr_t object, uint8_t player, u
     }
     else
     {
-        result = g_origUnitVisibility(object, player, flags);
+        result = original;
         if (enhance)
             result = EnhancedVisionResult(result, state);
     }
@@ -947,7 +1101,226 @@ static uintptr_t ResolveEnhancedVisionFogState()
     return static_cast<uintptr_t>((uint64_t{high} << 32) | low);
 }
 
+static uintptr_t __fastcall HookObserverFogView(uint32_t first, uint32_t second, uint8_t allPlayers)
+{
+    EnterHookCallback();
+    AcquireSRWLockExclusive(&g_observerFogLock);
+    uint8_t localPlayer = 0xFF;
+    const uintptr_t state = ResolveEnhancedVisionFogState();
+    const bool playerReady = SafeMemcpy(&localPlayer,
+        reinterpret_cast<const void*>(g_enhancedVisionPlayer), sizeof(localPlayer));
+    if (InterlockedCompareExchange(&g_observerFogInvocationLogged, 1, 0) == 0)
+        Log("[*] ObserverVision fog entry: player=%u allPlayers=%u state=0x%llX mode=%ld\n",
+            static_cast<unsigned>(localPlayer), static_cast<unsigned>(allPlayers),
+            static_cast<unsigned long long>(state),
+            InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0));
+    const bool overrideView = !IsDllUnloading() && state && !allPlayers &&
+        InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) == 2 &&
+        playerReady && localPlayer < 16;
+    uintptr_t result = 0;
+    __try
+    {
+        result = g_originalFogView(first, second, overrideView ? 1 : allPlayers);
+        if (overrideView)
+        {
+            if (g_observerFogState != state)
+                Log("[*] ObserverVision: native combined fog; opacity unchanged\n");
+            g_observerFogFirst = first;
+            g_observerFogSecond = second;
+            g_observerFogState = state;
+        }
+        else
+        {
+            g_observerFogState = 0;
+        }
+    }
+    __finally
+    {
+        ReleaseSRWLockExclusive(&g_observerFogLock);
+        LeaveHookCallback();
+    }
+    return result;
+}
+
+static uint8_t ObserverFogReadPlayer(uint8_t player, uintptr_t caller, uintptr_t expectedCallerRva)
+{
+    if (IsDllUnloading() || player >= 16 ||
+        InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 2)
+        return player;
+    const uintptr_t base = g_enhancedVisionPlayer - 0x3BB8BD0;
+    uint8_t localPlayer = 0xFF;
+    uint8_t renderPlayer = 0xFF;
+    if (caller != base + expectedCallerRva ||
+        !SafeMemcpy(&localPlayer, reinterpret_cast<const void*>(g_enhancedVisionPlayer), 1) ||
+        player != localPlayer ||
+        !SafeMemcpy(&renderPlayer, reinterpret_cast<const void*>(base + 0x446A950), 1) ||
+        renderPlayer != 16)
+        return player;
+    if (InterlockedCompareExchange(&g_observerFogReaderLogged, 1, 0) == 0)
+        Log("[*] ObserverVision: fog renderer reads combined player buffer; local=%u\n",
+            static_cast<unsigned>(localPlayer));
+    return 16;
+}
+
+static uintptr_t __fastcall HookObserverFogBuffer(uint8_t player, uintptr_t rectangle, uintptr_t output)
+{
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    EnterHookCallback();
+    const uintptr_t result = g_originalFogBuffer(
+        ObserverFogReadPlayer(player, caller, 0xB78C1B), rectangle, output);
+    LeaveHookCallback();
+    return result;
+}
+
+static uintptr_t __fastcall HookObserverFogTexture(uintptr_t output, uint8_t player)
+{
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    EnterHookCallback();
+    const uintptr_t result = g_originalFogTexture(output,
+        ObserverFogReadPlayer(player, caller, 0xB4214F));
+    LeaveHookCallback();
+    return result;
+}
+
+static bool SetObserverFogReaders(bool enable)
+{
+    static constexpr uint8_t bufferEntry[] = {
+        0x8B, 0x05, 0x7A, 0x02, 0xA8, 0x03, 0x4C, 0x8B, 0xD2,
+        0x33, 0x05, 0xC9, 0xD7, 0x4A, 0x03
+    };
+    static constexpr uint8_t textureEntry[] = {
+        0x0F, 0xB6, 0x05, 0xE9, 0x9C, 0xA6, 0x03, 0x80, 0xFA, 0x10,
+        0x44, 0x0F, 0xB6, 0xC2
+    };
+    struct ReaderHook
+    {
+        uintptr_t rva;
+        void* callback;
+        void** original;
+        const uint8_t* bytes;
+        size_t size;
+    };
+    const ReaderHook readers[] = {
+        {0xA00B80, reinterpret_cast<void*>(&HookObserverFogBuffer),
+         reinterpret_cast<void**>(&g_originalFogBuffer), bufferEntry, sizeof(bufferEntry)},
+        {0xA00C60, reinterpret_cast<void*>(&HookObserverFogTexture),
+         reinterpret_cast<void**>(&g_originalFogTexture), textureEntry, sizeof(textureEntry)},
+    };
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    bool success = base != 0;
+    for (const auto& reader : readers)
+    {
+        const uintptr_t entry = base + reader.rva;
+        if (enable)
+        {
+            if (!success || !VisionBytesEqual(entry, reader.bytes, reader.size) ||
+                (!*reader.original && MH_CreateHook(reinterpret_cast<void*>(entry),
+                    reader.callback, reader.original) != MH_OK) ||
+                MH_EnableHook(reinterpret_cast<void*>(entry)) != MH_OK)
+                return false;
+        }
+        else if (*reader.original)
+        {
+            const MH_STATUS status = MH_DisableHook(reinterpret_cast<void*>(entry));
+            if ((status != MH_OK && status != MH_ERROR_DISABLED) ||
+                !VisionBytesEqual(entry, reader.bytes, reader.size))
+                success = false;
+        }
+    }
+    if (success)
+        g_observerFogReadersEnabled = enable;
+    if (enable)
+        InterlockedExchange(&g_observerFogReaderLogged, 0);
+    return success;
+}
+
+static bool RestoreObserverFogView()
+{
+    bool restored = true;
+    AcquireSRWLockExclusive(&g_observerFogLock);
+    if (g_observerFogState)
+    {
+        const uintptr_t state = ResolveEnhancedVisionFogState();
+        if (!state)
+            restored = false;
+        else if (state == g_observerFogState)
+        {
+            __try
+            {
+                g_originalFogView(g_observerFogFirst, g_observerFogSecond, 0);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                restored = false;
+            }
+        }
+        if (restored)
+        {
+            g_observerFogState = 0;
+            Log("[-] ObserverVision: native fog selection restored\n");
+        }
+    }
+    ReleaseSRWLockExclusive(&g_observerFogLock);
+    return restored;
+}
+
 static bool RestoreEnhancedVisionFog();
+
+static bool InitializeObserverFogView()
+{
+    const uintptr_t base = g_enhancedVisionPlayer - 0x3BB8BD0;
+    const uintptr_t state = ResolveEnhancedVisionFogState();
+    uint32_t bounds[4] = {};
+    uint8_t localPlayer = 0xFF;
+    uint8_t originalAlpha = 0;
+    if (!state || !g_originalFogView || !g_playerSet ||
+        !SafeMemcpy(bounds, reinterpret_cast<const void*>(base + 0x4470DD0), sizeof(bounds)) ||
+        bounds[0] != 0 || bounds[1] != 0 ||
+        bounds[2] < 2 || bounds[2] > 256 || bounds[3] < 2 || bounds[3] > 256 ||
+        !SafeMemcpy(&localPlayer, reinterpret_cast<const void*>(g_enhancedVisionPlayer), 1) ||
+        localPlayer >= 16 ||
+        !SafeMemcpy(&originalAlpha, reinterpret_cast<const void*>(state + 0x20 + localPlayer), 1))
+    {
+        Log("[!] ObserverVision: current fog dimensions/state could not be verified\n");
+        return false;
+    }
+
+    bool applied = false;
+    AcquireSRWLockExclusive(&g_observerFogLock);
+    __try
+    {
+        __try
+        {
+            g_observerFogFirst = bounds[2];
+            g_observerFogSecond = bounds[3];
+            g_observerFogState = state;
+            g_originalFogView(bounds[2], bounds[3], 1);
+            uint32_t encodedMask = 0, maskKey = 0;
+            uint8_t renderPlayer = 0xFF, currentAlpha = 0;
+            const uint32_t players = g_playerSet(1) | g_playerSet(2);
+            applied = players != 0 &&
+                SafeMemcpy(&encodedMask, reinterpret_cast<const void*>(base + 0x4480E28), 4) &&
+                SafeMemcpy(&maskKey, reinterpret_cast<const void*>(base + 0x3EAFFD8), 4) &&
+                SafeMemcpy(&renderPlayer, reinterpret_cast<const void*>(base + 0x446A950), 1) &&
+                SafeMemcpy(&currentAlpha, reinterpret_cast<const void*>(state + 0x20 + localPlayer), 1) &&
+                ((encodedMask - maskKey - 0x33A7EAB5u) & players) == players &&
+                (renderPlayer == 16 || (players & (players - 1)) == 0) &&
+                currentAlpha == originalAlpha;
+            Log("[*] ObserverVision fog initialized: size=%ux%u mask=0x%08X player=%u alpha=%u verified=%d\n",
+                bounds[2], bounds[3], encodedMask - maskKey - 0x33A7EAB5u,
+                static_cast<unsigned>(renderPlayer), static_cast<unsigned>(currentAlpha), applied);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            Log("[!] ObserverVision: native fog initialization raised an exception\n");
+        }
+    }
+    __finally
+    {
+        ReleaseSRWLockExclusive(&g_observerFogLock);
+    }
+    return applied;
+}
 
 static bool ApplyEnhancedVisionFog()
 {
@@ -979,7 +1352,8 @@ static bool ApplyEnhancedVisionFog()
     if (state == g_enhancedVisionFogState && player != g_enhancedVisionFogPlayer)
         return RestoreEnhancedVisionFog() && ApplyEnhancedVisionFog();
     const bool sameState = state == g_enhancedVisionFogState;
-    if (sameState && currentMask == UINT32_MAX && currentAlpha == 127)
+    const uint8_t targetAlpha = 127;
+    if (sameState && currentMask == UINT32_MAX && currentAlpha == targetAlpha)
         return true;
     if (!sameState || currentMask != UINT32_MAX)
         g_enhancedVisionFogMask = currentMask;
@@ -997,7 +1371,7 @@ static bool ApplyEnhancedVisionFog()
         return false;
     }
     const uint32_t mask = UINT32_MAX;
-    const uint8_t alpha = 127;
+    const uint8_t alpha = targetAlpha;
     const bool applied = ResolveEnhancedVisionFogState() == state &&
         VisionBytesEqual(state + 0x10, reinterpret_cast<const uint8_t*>(&mask), sizeof(mask)) &&
         VisionBytesEqual(state + 0x20 + player, &alpha, sizeof(alpha));
@@ -1034,7 +1408,7 @@ static bool RestoreEnhancedVisionFog()
     if (!SafeMemcpy(reinterpret_cast<void*>(current + 0x10), &g_enhancedVisionFogMask,
                     sizeof(g_enhancedVisionFogMask)) ||
         !SafeMemcpy(reinterpret_cast<void*>(current + 0x20 + g_enhancedVisionFogPlayer),
-                    &g_enhancedVisionFogAlpha, sizeof(g_enhancedVisionFogAlpha)))
+                &g_enhancedVisionFogAlpha, sizeof(g_enhancedVisionFogAlpha)))
         return false;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
     __try
@@ -1048,7 +1422,7 @@ static bool RestoreEnhancedVisionFog()
     if (!VisionBytesEqual(current + 0x10, reinterpret_cast<const uint8_t*>(&g_enhancedVisionFogMask),
                           sizeof(g_enhancedVisionFogMask)) ||
         !VisionBytesEqual(current + 0x20 + g_enhancedVisionFogPlayer, &g_enhancedVisionFogAlpha,
-                          sizeof(g_enhancedVisionFogAlpha)))
+                  sizeof(g_enhancedVisionFogAlpha)))
         return false;
     g_enhancedVisionFogState = 0;
     Log("[-] EnhancedVision fog restored\n");
@@ -1058,6 +1432,39 @@ static bool RestoreEnhancedVisionFog()
 static bool RestoreEnhancedVision()
 {
     InterlockedExchange(&g_enhancedVisionActive, 0);
+    if (g_observerDisplayPatched)
+    {
+        if (!VisionBytesEqual(g_observerDisplaySelection, OBSERVER_DISPLAY_PATCH,
+                              sizeof(OBSERVER_DISPLAY_PATCH)) ||
+            !WriteCodeBytes(g_observerDisplaySelection, OBSERVER_DISPLAY_ORIGINAL,
+                            sizeof(OBSERVER_DISPLAY_ORIGINAL)) ||
+            !VisionBytesEqual(g_observerDisplaySelection, OBSERVER_DISPLAY_ORIGINAL,
+                              sizeof(OBSERVER_DISPLAY_ORIGINAL)))
+            return false;
+        g_observerDisplayPatched = false;
+    }
+    if (!SetObserverFogReaders(false))
+        return false;
+    if (g_observerViewPlayerEnabled)
+    {
+        const MH_STATUS status = MH_DisableHook(
+            reinterpret_cast<void*>(g_observerViewPlayerEntry));
+        if (status != MH_OK && status != MH_ERROR_DISABLED)
+            return false;
+        g_observerViewPlayerEnabled = false;
+    }
+    if (g_observerFogEnabled)
+    {
+        const MH_STATUS status = MH_DisableHook(reinterpret_cast<void*>(g_observerFogEntry));
+        if (status != MH_OK && status != MH_ERROR_DISABLED)
+            return false;
+        g_observerFogEnabled = false;
+    }
+    if (g_observerFogEntry &&
+        !VisionBytesEqual(g_observerFogEntry, OBSERVER_FOG_ORIGINAL, sizeof(OBSERVER_FOG_ORIGINAL)))
+        return false;
+    if (!RestoreObserverFogView())
+        return false;
     if (g_enhancedVisionHookEnabled)
     {
         const MH_STATUS status = MH_DisableHook(reinterpret_cast<void*>(g_enhancedVisionEntry));
@@ -1067,6 +1474,19 @@ static bool RestoreEnhancedVision()
             return false;
         }
         g_enhancedVisionHookEnabled = false;
+    }
+    if (g_observerPlayersEnabled)
+    {
+        const MH_STATUS status = MH_DisableHook(reinterpret_cast<void*>(g_observerPlayersEntry));
+        if (status != MH_OK && status != MH_ERROR_DISABLED)
+            return false;
+        g_observerPlayersEnabled = false;
+    }
+    if (g_observerPlayersEntry &&
+        !VisionBytesEqual(g_observerPlayersEntry, OBSERVER_PLAYERS_ORIGINAL, sizeof(OBSERVER_PLAYERS_ORIGINAL)))
+    {
+        Log("[!] ObserverVision: players entry restoration could not be verified\n");
+        return false;
     }
     if (g_enhancedVisionEntry &&
         !VisionBytesEqual(g_enhancedVisionEntry, VISION_ENTRY_ORIGINAL, sizeof(VISION_ENTRY_ORIGINAL)))
@@ -1096,6 +1516,80 @@ static bool RestoreEnhancedVision()
     return true;
 }
 
+static bool EnableObserverPlayersHook()
+{
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    static constexpr uint8_t playerSetEntry[] = {
+        0x48, 0x83, 0xEC, 0x28, 0x8B, 0xC1, 0x4C, 0x8D, 0x05, 0xA3, 0x73, 0xA9, 0xFF
+    };
+    if (!base || !VisionBytesEqual(base + 0x568C50, playerSetEntry, sizeof(playerSetEntry)))
+        return false;
+    g_playerSet = reinterpret_cast<PlayerSetFn>(base + 0x568C50);
+    if (!g_observerPlayersEntry)
+    {
+        const uintptr_t entry = base + 0x9569D0;
+        if (!base || !VisionBytesEqual(entry, OBSERVER_PLAYERS_ORIGINAL, sizeof(OBSERVER_PLAYERS_ORIGINAL)))
+            return false;
+        const MH_STATUS created = MH_CreateHook(reinterpret_cast<void*>(entry),
+            reinterpret_cast<void*>(&HookObserverPlayers), reinterpret_cast<void**>(&g_originalObserverPlayers));
+        if (created != MH_OK)
+            return false;
+        g_observerPlayersEntry = entry;
+    }
+    if (!VisionBytesEqual(g_observerPlayersEntry, OBSERVER_PLAYERS_ORIGINAL, sizeof(OBSERVER_PLAYERS_ORIGINAL)))
+        return false;
+    const MH_STATUS status = MH_EnableHook(reinterpret_cast<void*>(g_observerPlayersEntry));
+    if (status != MH_OK)
+        return false;
+    g_observerPlayersEnabled = true;
+    return true;
+}
+
+static bool EnableObserverFogHook()
+{
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    const uintptr_t entry = base + 0xA02A20;
+    if (!base || !VisionBytesEqual(entry, OBSERVER_FOG_ORIGINAL, sizeof(OBSERVER_FOG_ORIGINAL)))
+        return false;
+    if (!g_originalFogView)
+    {
+        if (MH_CreateHook(reinterpret_cast<void*>(entry), reinterpret_cast<void*>(&HookObserverFogView),
+                          reinterpret_cast<void**>(&g_originalFogView)) != MH_OK)
+            return false;
+        g_observerFogEntry = entry;
+    }
+    if (MH_EnableHook(reinterpret_cast<void*>(entry)) != MH_OK)
+        return false;
+    InterlockedExchange(&g_observerFogInvocationLogged, 0);
+    g_observerFogEnabled = true;
+    return true;
+}
+
+static bool EnableObserverViewPlayerHook()
+{
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    const uintptr_t entry = base + 0x92BDE0;
+    static constexpr uint8_t expected[] = {
+        0x48, 0x83, 0xEC, 0x28, 0xE8, 0xC7, 0x0F, 0x7F, 0xFF,
+    };
+    if (!base || !VisionBytesEqual(entry, expected, sizeof(expected)))
+        return false;
+    if (!g_originalViewPlayer)
+    {
+        if (MH_CreateHook(reinterpret_cast<void*>(entry),
+                          reinterpret_cast<void*>(&HookObserverViewPlayer),
+                          reinterpret_cast<void**>(&g_originalViewPlayer)) != MH_OK)
+            return false;
+        g_observerViewPlayerEntry = entry;
+    }
+    const MH_STATUS status = MH_EnableHook(reinterpret_cast<void*>(entry));
+    if (status != MH_OK && status != MH_ERROR_ENABLED)
+        return false;
+    g_observerViewPlayerEnabled = true;
+    InterlockedExchange(&g_observerViewPlayerLogged, 0);
+    return true;
+}
+
 static bool ApplyEnhancedVision()
 {
     if (InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0)
@@ -1108,6 +1602,45 @@ static bool ApplyEnhancedVision()
         !VisionBytesEqual(g_enhancedVisionAux, ENHANCED_VISION_AUX_ORIGINAL,
                           sizeof(ENHANCED_VISION_AUX_ORIGINAL)))
         return false;
+    if (g_observerVisionSelected)
+    {
+        const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+        g_observerDisplaySelection = base + 0x1CE80B7;
+        if (!VisionBytesEqual(g_observerDisplaySelection, OBSERVER_DISPLAY_ORIGINAL,
+                      sizeof(OBSERVER_DISPLAY_ORIGINAL)))
+            return false;
+        if (!EnableObserverPlayersHook() || !EnableObserverFogHook() ||
+            !EnableObserverViewPlayerHook() || !SetObserverFogReaders(true))
+        {
+            RestoreEnhancedVision();
+            return false;
+        }
+        if (MH_EnableHook(reinterpret_cast<void*>(g_enhancedVisionEntry)) != MH_OK)
+        {
+            RestoreEnhancedVision();
+            return false;
+        }
+        g_enhancedVisionHookEnabled = true;
+        if (!WriteCodeBytes(g_observerDisplaySelection, OBSERVER_DISPLAY_PATCH,
+                            sizeof(OBSERVER_DISPLAY_PATCH)))
+        {
+            RestoreEnhancedVision();
+            return false;
+        }
+        g_observerDisplayPatched = true;
+        InterlockedExchange(&g_observerPlayersQueryLogged, 0);
+        InterlockedExchange(&g_observerVisibilityResultLogged, 0);
+        for (volatile LONG& logged : g_observerOwnerResultLogged)
+            InterlockedExchange(&logged, 0);
+        InterlockedExchange(&g_enhancedVisionActive, 2);
+        if (!InitializeObserverFogView())
+        {
+            RestoreEnhancedVision();
+            return false;
+        }
+        Log("[+] ObserverVision enabled; native player union, fog opacity unchanged\n");
+        return true;
+    }
     if (!WriteCodeBytes(g_enhancedVisionAux, ENHANCED_VISION_AUX_PATCH,
                         sizeof(ENHANCED_VISION_AUX_PATCH)))
         return false;
@@ -1134,7 +1667,8 @@ static bool ApplyEnhancedVision()
 static bool ApplyFullMapVisionPatch()
 {
     const bool result = !IsDllUnloading() &&
-        (g_enhancedVisionSelected ? ApplyEnhancedVision() : ApplyLegacyFullMapVisionPatch());
+        ((g_enhancedVisionSelected || g_observerVisionSelected)
+            ? ApplyEnhancedVision() : ApplyLegacyFullMapVisionPatch());
     g_fullMapVisionFailed = !result;
     return result;
 }
@@ -1182,11 +1716,12 @@ static void UpdateFullMapVisionMapState(const char* mapPath, const char* mapDesc
 bool EnableFullMapVision()
 {
     AcquireSRWLockExclusive(&g_fullMapVisionLock);
-    if (IsDllUnloading())
+    if (IsDllUnloading() || (g_observerVisionSelected && !RestoreFullMapVisionPatch()))
     {
         ReleaseSRWLockExclusive(&g_fullMapVisionLock);
         return false;
     }
+    g_observerVisionSelected = false;
     InterlockedExchange(&g_fullMapVisionRequested, 1);
     const LONG mapIndex = InterlockedCompareExchange(&g_fullMapVisionMapIndex, 0, 0);
     const bool result = (!FULL_MAP_VISION_MAP_LIMIT_ENABLED || mapIndex >= 0)
@@ -1209,7 +1744,7 @@ void DisableFullMapVision()
 
 bool IsFullMapVisionEnabled()
 {
-    return InterlockedCompareExchange(&g_fullMapVisionRequested, 0, 0) != 0;
+    return InterlockedCompareExchange(&g_fullMapVisionRequested, 0, 0) == 1;
 }
 
 bool IsFullMapVisionApplied()
@@ -1217,7 +1752,12 @@ bool IsFullMapVisionApplied()
     AcquireSRWLockShared(&g_fullMapVisionLock);
     const bool applied = !g_fullMapVisionFailed && (g_fullMapVisionPatched ||
         (g_enhancedVisionAuxPatched && g_enhancedVisionHookEnabled &&
-         InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0));
+         InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) == 1) ||
+        (g_observerPlayersEnabled && g_observerFogEnabled && g_observerFogReadersEnabled &&
+         g_observerViewPlayerEnabled &&
+         g_observerDisplayPatched &&
+         g_enhancedVisionHookEnabled &&
+         InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) == 2));
     ReleaseSRWLockShared(&g_fullMapVisionLock);
     return applied;
 }
@@ -1225,18 +1765,57 @@ bool IsFullMapVisionApplied()
 bool SetFullMapVisionEnhanced(bool enhanced)
 {
     AcquireSRWLockExclusive(&g_fullMapVisionLock);
+    if (g_observerVisionSelected && !IsDllUnloading())
+    {
+        g_enhancedVisionSelected = enhanced;
+        ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+        return true;
+    }
     if (IsDllUnloading() || !RestoreFullMapVisionPatch())
     {
         ReleaseSRWLockExclusive(&g_fullMapVisionLock);
         return false;
     }
     g_enhancedVisionSelected = enhanced;
+    g_observerVisionSelected = false;
     const bool shouldApply = IsFullMapVisionEnabled() &&
         (!FULL_MAP_VISION_MAP_LIMIT_ENABLED ||
          InterlockedCompareExchange(&g_fullMapVisionMapIndex, 0, 0) >= 0);
     const bool result = !shouldApply || ApplyFullMapVisionPatch();
     ReleaseSRWLockExclusive(&g_fullMapVisionLock);
     return result;
+}
+
+bool SetFullMapVisionObserver(bool observer)
+{
+    AcquireSRWLockExclusive(&g_fullMapVisionLock);
+    if (!observer && !g_observerVisionSelected)
+    {
+        ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+        return true;
+    }
+    if (IsDllUnloading() || !RestoreFullMapVisionPatch())
+    {
+        ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+        return false;
+    }
+    g_observerVisionSelected = observer;
+    InterlockedExchange(&g_fullMapVisionRequested, observer ? 2 : 0);
+    const bool shouldApply = observer &&
+        (!FULL_MAP_VISION_MAP_LIMIT_ENABLED ||
+         InterlockedCompareExchange(&g_fullMapVisionMapIndex, 0, 0) >= 0);
+    const bool result = !shouldApply || ApplyFullMapVisionPatch();
+    ReleaseSRWLockExclusive(&g_fullMapVisionLock);
+    return result;
+}
+
+bool IsFullMapVisionObserver()
+{
+    AcquireSRWLockShared(&g_fullMapVisionLock);
+    const bool selected = g_observerVisionSelected &&
+        InterlockedCompareExchange(&g_fullMapVisionRequested, 0, 0) == 2;
+    ReleaseSRWLockShared(&g_fullMapVisionLock);
+    return selected;
 }
 
 bool IsFullMapVisionEnhanced()
@@ -1264,7 +1843,7 @@ void UpdateFullMapVisionRuntime()
     if (!IsDllUnloading() && now - lastCheck >= 1000 &&
         g_enhancedVisionSelected && IsFullMapVisionEnabled() &&
         g_enhancedVisionHookEnabled && g_enhancedVisionAuxPatched &&
-        InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) != 0 &&
+        InterlockedCompareExchange(&g_enhancedVisionActive, 0, 0) == 1 &&
         (!FULL_MAP_VISION_MAP_LIMIT_ENABLED ||
          InterlockedCompareExchange(&g_fullMapVisionMapIndex, 0, 0) >= 0))
     {
@@ -1517,6 +2096,257 @@ float GetExperienceMultiplier()
     return static_cast<float>(InterlockedCompareExchange(&g_experienceMultiplier, 0, 0));
 }
 
+static SRWLOCK g_leaderPanelLock = SRWLOCK_INIT;
+static volatile LONG g_leaderPanelRequested = 0;
+static volatile LONG g_leaderPanelApplied = 0;
+static volatile LONG g_leaderPanelFailed = 0;
+static uintptr_t g_leaderPanelSaved = 0;
+static bool g_leaderPanelWasVisible = false;
+using LeaderHotkeyFn = int(__fastcall*)(uintptr_t, uintptr_t);
+static LeaderHotkeyFn g_originalLeaderHotkey = nullptr;
+static uintptr_t g_leaderHotkeyEntry = 0;
+static bool g_leaderHotkeyEnabled = false;
+
+static constexpr bool IsLeaderMenuHotkey(uint32_t eventType, uint32_t action)
+{
+    return eventType == 0x18 && action >= 0x12 && action <= 0x1D;
+}
+
+static_assert(IsLeaderMenuHotkey(0x18, 0x12));
+static_assert(IsLeaderMenuHotkey(0x18, 0x1D));
+static_assert(!IsLeaderMenuHotkey(0x18, 0x11));
+static_assert(!IsLeaderMenuHotkey(0x18, 0x1E));
+static_assert(!IsLeaderMenuHotkey(0x17, 0x12));
+
+static int __fastcall HookLeaderHotkey(uintptr_t panel, uintptr_t event)
+{
+    EnterHookCallback();
+    uint32_t eventType = 0;
+    uint32_t action = 0;
+    const bool ignore = !IsDllUnloading() && IsLeaderPanelEnabled() && event &&
+        SafeMemcpy(&eventType, reinterpret_cast<const void*>(event + 0x10), sizeof(eventType)) &&
+        SafeMemcpy(&action, reinterpret_cast<const void*>(event + 0x20), sizeof(action)) &&
+        IsLeaderMenuHotkey(eventType, action);
+    const int result = ignore ? 1 : g_originalLeaderHotkey(panel, event);
+    LeaveHookCallback();
+    return result;
+}
+
+static bool EnableLeaderHotkeyFilter()
+{
+    if (g_leaderHotkeyEnabled)
+        return true;
+    if (!g_leaderHotkeyEntry)
+    {
+        const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+        const uintptr_t entry = base + 0xC2BA40;
+        static constexpr uint8_t expected[] = {
+            0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10,
+            0x57, 0x48, 0x83, 0xEC, 0x20, 0x83, 0x7A, 0x10, 0x18
+        };
+        if (!base || !VisionBytesEqual(entry, expected, sizeof(expected)))
+            return false;
+        const MH_STATUS created = MH_CreateHook(reinterpret_cast<void*>(entry),
+            reinterpret_cast<void*>(&HookLeaderHotkey), reinterpret_cast<void**>(&g_originalLeaderHotkey));
+        if (created != MH_OK)
+        {
+            Log("[!] LeaderPanel hotkey hook creation failed: %s\n", MH_StatusToString(created));
+            return false;
+        }
+        g_leaderHotkeyEntry = entry;
+    }
+    const MH_STATUS enabled = MH_EnableHook(reinterpret_cast<void*>(g_leaderHotkeyEntry));
+    if (enabled != MH_OK && enabled != MH_ERROR_ENABLED)
+        return false;
+    g_leaderHotkeyEnabled = true;
+    Log("[+] LeaderPanel menu hotkeys disabled; mouse selection unchanged\n");
+    return true;
+}
+
+static bool DisableLeaderHotkeyFilter()
+{
+    if (!g_leaderHotkeyEnabled)
+        return true;
+    const MH_STATUS disabled = MH_DisableHook(reinterpret_cast<void*>(g_leaderHotkeyEntry));
+    if (disabled != MH_OK && disabled != MH_ERROR_DISABLED)
+        return false;
+    g_leaderHotkeyEnabled = false;
+    Log("[-] LeaderPanel menu hotkeys restored\n");
+    return true;
+}
+
+static bool FindLeaderPanel(uintptr_t& panel)
+{
+    panel = 0;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    IMAGE_DOS_HEADER dos{};
+    IMAGE_NT_HEADERS64 nt{};
+    if (!base || !SafeMemcpy(&dos, reinterpret_cast<const void*>(base), sizeof(dos)) ||
+        dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0 || dos.e_lfanew > 0x100000 ||
+        !SafeMemcpy(&nt, reinterpret_cast<const void*>(base + dos.e_lfanew), sizeof(nt)) ||
+        nt.Signature != IMAGE_NT_SIGNATURE || nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+        nt.FileHeader.TimeDateStamp != 0x6A57F729 || nt.OptionalHeader.SizeOfImage != 0x8204000)
+        return false;
+
+    uintptr_t tail = 0;
+    uintptr_t node = 0;
+    if (!SafeMemcpy(&tail, reinterpret_cast<const void*>(base + 0x443FA40 + 0xD0), sizeof(tail)))
+        return false;
+    if (!tail)
+        return true;
+    if (!SafeMemcpy(&node, reinterpret_cast<const void*>(tail), sizeof(node)))
+        return false;
+    node &= ~uintptr_t{1};
+    for (size_t count = 0; node && count < 256; ++count)
+    {
+        uintptr_t record[3]{};
+        if (!SafeMemcpy(record, reinterpret_cast<const void*>(node), sizeof(record)))
+            return false;
+        const uintptr_t subscriber = record[1] & ~uintptr_t{1};
+        uintptr_t interfaceTable = 0;
+        uintptr_t objectTable = 0;
+        if (record[2] == base + 0xC25740 && subscriber > 0x10000 &&
+            SafeMemcpy(&interfaceTable, reinterpret_cast<const void*>(subscriber), sizeof(interfaceTable)) &&
+            interfaceTable == base + 0x2B25790 &&
+            SafeMemcpy(&objectTable, reinterpret_cast<const void*>(subscriber - 0x10), sizeof(objectTable)) &&
+            objectTable == base + 0x2B25538)
+        {
+            const uintptr_t candidate = subscriber - 0x10;
+            constexpr uintptr_t childOffsets[] = {0x148, 0x170};
+            constexpr uintptr_t childTables[] = {0x2B24348, 0x2B25018};
+            for (size_t index = 0; index < 2; ++index)
+            {
+                uintptr_t child = 0;
+                uintptr_t childTable = 0;
+                if (!SafeMemcpy(&child, reinterpret_cast<const void*>(candidate + childOffsets[index]), sizeof(child)) ||
+                    !child || !SafeMemcpy(&childTable, reinterpret_cast<const void*>(child), sizeof(childTable)) ||
+                    childTable != base + childTables[index])
+                    return false;
+            }
+            panel = candidate;
+            return true;
+        }
+        if (record[0] & 1)
+            return true;
+        node = record[0];
+    }
+    return node == 0;
+}
+
+static bool SetLeaderPanelVisible(uintptr_t panel, bool visible)
+{
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA("SC2_x64.exe"));
+    uintptr_t table = 0;
+    uintptr_t function = 0;
+    static constexpr uint8_t entry[] = {0x40, 0x56, 0x48, 0x83, 0xEC, 0x40};
+    if (!base || !panel ||
+        !SafeMemcpy(&table, reinterpret_cast<const void*>(panel), sizeof(table)) ||
+        table != base + 0x2B25538 ||
+        !SafeMemcpy(&function, reinterpret_cast<const void*>(table + 0x40), sizeof(function)) ||
+        function != base + 0x14E48C0 || !VisionBytesEqual(function, entry, sizeof(entry)))
+        return false;
+    __try
+    {
+        reinterpret_cast<void(__fastcall*)(uintptr_t, bool)>(function)(panel, visible);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+    uint8_t flags = 0;
+    return SafeMemcpy(&flags, reinterpret_cast<const void*>(panel + 0x48), sizeof(flags)) &&
+        ((flags & 1) != 0) == visible;
+}
+
+static bool RestoreLeaderPanel()
+{
+    if (!g_leaderPanelSaved)
+        return true;
+    uintptr_t current = 0;
+    if (!FindLeaderPanel(current))
+        return false;
+    if (current == g_leaderPanelSaved && !SetLeaderPanelVisible(current, g_leaderPanelWasVisible))
+        return false;
+    g_leaderPanelSaved = 0;
+    InterlockedExchange(&g_leaderPanelApplied, 0);
+    Log("[-] LeaderPanel visibility restored or object removed\n");
+    return true;
+}
+
+void EnableLeaderPanel(bool enabled)
+{
+    if (!IsDllUnloading())
+        InterlockedExchange(&g_leaderPanelRequested, enabled ? 1 : 0);
+}
+
+bool IsLeaderPanelEnabled()
+{
+    return InterlockedCompareExchange(&g_leaderPanelRequested, 0, 0) != 0;
+}
+
+bool IsLeaderPanelApplied()
+{
+    return InterlockedCompareExchange(&g_leaderPanelApplied, 0, 0) != 0;
+}
+
+bool HasLeaderPanelError()
+{
+    return InterlockedCompareExchange(&g_leaderPanelFailed, 0, 0) != 0;
+}
+
+void UpdateLeaderPanel()
+{
+    if (IsDllUnloading() || !TryAcquireSRWLockExclusive(&g_leaderPanelLock))
+        return;
+    static ULONGLONG lastCheck = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (IsDllUnloading() || now - lastCheck < 250)
+    {
+        ReleaseSRWLockExclusive(&g_leaderPanelLock);
+        return;
+    }
+    lastCheck = now;
+    bool success = true;
+    if (!IsLeaderPanelEnabled())
+    {
+        success = RestoreLeaderPanel() && EnableLeaderHotkeyFilter();
+    }
+    else
+    {
+        uintptr_t panel = 0;
+        success = FindLeaderPanel(panel);
+        if (success && panel != g_leaderPanelSaved)
+        {
+            g_leaderPanelSaved = 0;
+            InterlockedExchange(&g_leaderPanelApplied, 0);
+        }
+        if (success && panel)
+        {
+            uint8_t flags = 0;
+            success = EnableLeaderHotkeyFilter() &&
+                SafeMemcpy(&flags, reinterpret_cast<const void*>(panel + 0x48), sizeof(flags));
+            if (success)
+            {
+                if (!g_leaderPanelSaved)
+                {
+                    g_leaderPanelSaved = panel;
+                    g_leaderPanelWasVisible = (flags & 1) != 0;
+                }
+                success = (flags & 1) != 0 || SetLeaderPanelVisible(panel, true);
+                if (success && !IsLeaderPanelApplied())
+                    Log("[+] LeaderPanel visibility enabled; IncomeFrame and ProductionFrame verified\n");
+                InterlockedExchange(&g_leaderPanelApplied, success ? 1 : 0);
+            }
+        }
+    }
+    if (!success && !HasLeaderPanelError())
+        Log("[!] LeaderPanel lookup or visibility update failed\n");
+    InterlockedExchange(&g_leaderPanelFailed, success ? 0 : 1);
+    if (!success)
+        InterlockedExchange(&g_leaderPanelApplied, 0);
+    ReleaseSRWLockExclusive(&g_leaderPanelLock);
+}
+
 bool CleanupGameFeatures()
 {
     // 必须在 MH_Uninitialize 和 DLL 卸载前执行：先阻止 detour 修改 payload，
@@ -1524,7 +2354,12 @@ bool CleanupGameFeatures()
     EnableExperienceMultiplier(false);
     DisableFullMapVision();
     DisableMasteryMax();
-    return !HasFullMapVisionError() && !IsMasteryMaxEnabled();
+    AcquireSRWLockExclusive(&g_leaderPanelLock);
+    InterlockedExchange(&g_leaderPanelRequested, 0);
+    const bool leaderRestored = RestoreLeaderPanel();
+    const bool leaderHotkeysRestored = DisableLeaderHotkeyFilter();
+    ReleaseSRWLockExclusive(&g_leaderPanelLock);
+    return !HasFullMapVisionError() && !IsMasteryMaxEnabled() && leaderRestored && leaderHotkeysRestored;
 }
 
 // ════════════════════════════════════════════════════════════════

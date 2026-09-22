@@ -86,8 +86,16 @@ bool IsFullMapVisionEnabled();
 bool IsFullMapVisionApplied();
 bool SetFullMapVisionEnhanced(bool enhanced);
 bool IsFullMapVisionEnhanced();
+bool SetFullMapVisionObserver(bool observer);
+bool IsFullMapVisionObserver();
 bool HasFullMapVisionError();
 void UpdateFullMapVisionRuntime();
+
+void EnableLeaderPanel(bool enabled);
+bool IsLeaderPanelEnabled();
+bool IsLeaderPanelApplied();
+bool HasLeaderPanelError();
+void UpdateLeaderPanel();
 
 // ─── 经验倍率（MinHook，1-30 倍） ───
 // SetupExperienceHooks 必须在 MH_Initialize 之后、MH_EnableHook(MH_ALL_HOOKS)

@@ -35,10 +35,26 @@ static volatile LONG      g_devicePresentCalls = 0;
 static volatile LONG      g_devicePresentExCalls = 0;
 static volatile LONG      g_deviceEndSceneCalls = 0;
 static volatile LONG      g_presentResultLogged = 0;
+static volatile LONG      g_featureCleanupState = 0;
+static volatile LONG      g_featureCleanupSucceeded = 0;
 
 static void RenderFromSwapChain(IDirect3DSwapChain9* swapChain)
 {
+    if (InterlockedCompareExchange(&g_featureCleanupState, 2, 1) == 1)
+    {
+        const bool success = CleanupGameFeatures();
+        InterlockedExchange(&g_featureCleanupSucceeded, success ? 1 : 0);
+        InterlockedExchange(&g_featureCleanupState, 3);
+        Log(success
+            ? "[+] Game features restored on render thread\n"
+            : "[!] Game feature restoration failed on render thread\n");
+        return;
+    }
+    if (InterlockedCompareExchange(&g_featureCleanupState, 0, 0) != 0)
+        return;
+
     UpdateFullMapVisionRuntime();
+    UpdateLeaderPanel();
     if (!IsDllUnloading() && !IsOverlayReady())
     {
         __try
@@ -595,21 +611,31 @@ bool SetupHooks()
 
 bool CleanupHooks()
 {
+    InterlockedExchange(&g_featureCleanupSucceeded, 0);
+    InterlockedExchange(&g_featureCleanupState, 1);
+    const ULONGLONG cleanupDeadline = GetTickCount64() + 5000;
+    while (InterlockedCompareExchange(&g_featureCleanupState, 0, 0) != 3 &&
+           GetTickCount64() < cleanupDeadline)
+    {
+        Sleep(10);
+    }
+    if (InterlockedCompareExchange(&g_featureCleanupState, 0, 0) != 3 ||
+        InterlockedCompareExchange(&g_featureCleanupSucceeded, 0, 0) == 0)
+    {
+        Log("[!] Render-thread feature cleanup timed out or failed; DLL unload aborted\n");
+        return false;
+    }
+
     BeginDllUnload();
+    DetachOverlayWindowProc();
+    WaitForHookCallbacks();
     const MH_STATUS disableStatus = MH_DisableHook(MH_ALL_HOOKS);
     if (disableStatus != MH_OK && disableStatus != MH_ERROR_NOT_CREATED)
     {
         Log("[!] MH_DisableHook cleanup failed: %s\n", MH_StatusToString(disableStatus));
         return false;
     }
-    DetachOverlayWindowProc();
     WaitForHookCallbacks();
-
-    if (!CleanupGameFeatures())
-    {
-        Log("[!] Feature restoration failed; keeping DLL and trampolines loaded\n");
-        return false;
-    }
     const MH_STATUS uninitializeStatus = MH_Uninitialize();
     if (uninitializeStatus != MH_OK && uninitializeStatus != MH_ERROR_NOT_INITIALIZED)
     {
